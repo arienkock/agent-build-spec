@@ -313,7 +313,7 @@ A crash during an atomic write (after temp-file creation, before rename) leaves 
 The plan says "after agent completes: run verifications" — clarify: verifications run only when the agent exits with code 0. A non-zero exit code skips verification and goes directly to the retry/fail path. Otherwise verification results are meaningless against a broken workspace.
 
 **max_retries exhausted must produce a `failed` record and clean exit.**
-When the shared retry counter reaches zero (across timeout retries and verification-failure retries), `task_run.py` must write a `failed` result record, remove `.agent-context/`, release the lock, and exit with a non-zero status code. It must not leave the run in a `running` state.
+When the shared retry counter reaches zero (across timeout retries and verification-failure retries), `task_run.py` must write a `failed` result record, release the lock, and exit with a non-zero status code. It must not leave the run in a `running` state. **`src/` MUST be left as-is** — including `.agent-context/` — because the spec mandates that on timeout or failure the workspace contents are preserved so the user can inspect partial state and trigger an explicit additional run. The workspace prep step on the next run is designed to detect an existing `.agent-context/` and prompt for confirmation before overwriting it.
 
 **Rollback: validate `previousResults` chain before starting.**
 Before touching any files, `rollback.py` must verify that the file named in `previousResults` actually exists in the results directory. If the chain is broken (file missing or itself malformed), abort with an error — do not partially restore src/ and leave results in an inconsistent state.
@@ -426,7 +426,7 @@ All tests use `pytest`. Filesystem fixtures use `tmp_path`. No mocking of subpro
 - Non-zero exit code: `AgentCompleted` emitted (not swallowed)
 
 #### `task_run.py` — retry logic
-- **[HIGH]** `max_retries` exhausted → `failed` record written, `.agent-context/` removed, lock released, process exits non-zero
+- **[HIGH]** `max_retries` exhausted → `failed` record written, lock released, process exits non-zero; `src/` (including `.agent-context/`) is left as-is per spec
 - **[HIGH]** After `max_retries` exhausted, status is `failed` (not `running`)
 - Timeout retry uses identical prompt (not modified)
 - Verification failure retry appends only the most recent failure reasoning (not accumulated)
