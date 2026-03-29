@@ -20,7 +20,8 @@ The root directory of an Agent Build Spec project **MUST** have the following st
 ├── verifications/
 │   └── <Verification ID>.md
 ├── results/
-│   └── results-<Task ID>.json
+│   ├── results-<Task ID>.json
+│   └── results-<Task ID>--run-<Order>.json
 └── src/
 ```
 
@@ -53,7 +54,7 @@ A Verification is a validation check defined by a file in the `verifications/` d
 
 ### Global Instructions
 
-Global Instructions are provided in `global/GLOBAL.md` and contain context applicable across all tasks. Task instructions **MAY** reference concepts defined in global instructions, as they are made available to the agent. Tasks **MAY** also reference concepts from previous tasks if consistently named in the workspace.
+Global Instructions are provided in `global/GLOBAL.md` and contain context applicable across all tasks. Task instructions **MAY** reference concepts defined in global instructions, as they are made available to the agent.
 
 ---
 
@@ -63,9 +64,9 @@ The Process Spec defines how an automated system executes tasks against the stru
 
 ## Concepts
 
-### Task Run
+### Resume Point
 
-A Task Run is the complete execution cycle for a task, including preflight checks, workspace setup, agent invocation, verification, retries, and result recording. Before execution, the system **MUST** determine an unambiguous resume point by inspecting the task results records in lexicographical task order. The resume point is unambiguous in exactly three cases:
+The Resume Point is the task selected for execution before a Task Run begins. The system **MUST** determine an unambiguous resume point by inspecting the task results records in lexicographical task order. The resume point is unambiguous in exactly three cases:
 
 - **No results exist** — begin from the first task.
 - **Last result was not a success** — re-run that task (this acts as an explicit additional retry).
@@ -73,9 +74,13 @@ A Task Run is the complete execution cycle for a task, including preflight check
 
 Any other state — such as a failed or missing result for an intermediate task followed by a successful result for a later task — is ambiguous. The system **MUST** abort with an error in such cases, requiring manual intervention before proceeding.
 
-Before determining the resume point, the system **MUST** also compare the set of task directories on disk against the set of task IDs referenced in results records. If there is any discrepancy — a task exists on disk with no corresponding result, or a result references a task ID no longer present on disk — the system **MUST** require explicit user confirmation before proceeding. The system **MAY** assist the user in reconciling the differences (e.g. by listing the discrepancies and suggesting corrective actions).
+As an exception, the user **MAY** explicitly request execution of a specific task out of sequence. The system **MUST** require explicit user confirmation before proceeding. If confirmed, the system **MUST** create placeholder results records with status `skipped` for all intermediate tasks that lack a result, making the state unambiguous before proceeding.
 
-Task runs **MUST** include timeouts and retry limits for both agent execution and verifications.
+The system **MUST** also compare the set of task directories on disk against the set of task IDs referenced in results records. If there is any discrepancy — a task exists on disk with no corresponding result, or a result references a task ID no longer present on disk — the system **MUST** require explicit user confirmation before proceeding. The system **MAY** assist the user in reconciling the differences (e.g. by listing the discrepancies and suggesting corrective actions).
+
+### Task Run
+
+A Task Run is the complete execution cycle for a specific task, including preflight checks, workspace preparation, agent invocation, verification, retries, and result recording. A Task Run requires a task ID, which is determined by the Resume Point before the run begins. Task runs **MUST** include timeouts and retry limits for both agent execution and verifications.
 
 ### Results Records
 
@@ -96,13 +101,17 @@ Example cost and effort metrics:
 
 ## Task Run Process
 
+### Resume Point Determination
+
+Before any Task Run begins, the system **MUST** determine the Resume Point as defined above. Only once an unambiguous task ID has been established does the Task Run Process proceed.
+
 ### Preflight Checks
 
 Before initiating a task run, the system **MUST** verify that the project root is a Git repository. It **SHOULD** check for uncommitted changes in `tasks/`, `verifications/`, and `src/` directories, and **MUST** require explicit user confirmation before proceeding if any are found.
 
 ### Workspace Preparation
 
-The agent operates in-place within `src/`. The system **MUST** copy the current task's directory, the global instructions, and all verification files into `src/` so the agent has access to them. The system **MUST** ensure that these copied files do not collide with any filenames already present in `src/`; if a collision is detected, the task run **MUST** abort with an error.
+The agent operates in-place within `src/`. The system **MUST** copy the current task's directory, the global instructions, and all verification files into `src/` so the agent has access to them. The system **MUST** ensure that none of the copied paths conflict with paths already present in `src/`; if a conflict is detected, the task run **MUST** abort with an error.
 
 ### Agent Invocation
 
