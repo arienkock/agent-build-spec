@@ -104,11 +104,12 @@ Prompt is **always passed via stdin**, never interpolated into `agent_command`. 
 
 **New:** `preflight.py`, `workspace.py`; extends `results.py`, `task_run.py`, `cli.py`
 
-- Preflight: verify git repo, required dirs (`src/`, `tasks/`, `verifications/`), clean working tree (prompt if dirty), acquire lock file atomically (`O_EXCL`); stale lock: check PID + cmdline, refuse if unverifiable
-- Workspace: copy task dir → `src/.agent-context/task/`, `global/` → `src/.agent-context/global/` (skip if absent), `verifications/` → `src/.agent-context/verifications/`; confirm before overwriting existing context
+- Preflight: verify git repo, required dirs (`src/`, `tasks/`, `verifications/`), clean working tree (prompt if dirty), acquire lock file atomically (`O_EXCL`) at `<project_root>/.agent-build.lock`; stale lock: check PID + cmdline, refuse if unverifiable
+- Workspace: copy task dir → `src/.agent-context/task/`, `global/` → `src/.agent-context/global/` (skip if absent), `verifications/` → `src/.agent-context/verifications/`; confirm before overwriting existing context (message: "a previous run likely left the directory behind"); delete before recopy if confirmed
+- **Gitignore guard:** before copying, ensure `.agent-context` is listed in `src/.gitignore` (append if absent, create file if needed); this is CRITICAL — without it, a failed run leaves untracked files that block subsequent preflight checks and rollback
 - Write `running` record (with `base_commit`) before agent; write `completed` after
 - Remove `src/.agent-context/` before committing (success path only; leave as-is on failure)
-- Commit stages only `src/` and `results/`; abort if no changes in either
+- Commit stages only `src/` and `results/`; abort if no changes in either (both empty)
 
 ---
 
@@ -120,7 +121,7 @@ Prompt is **always passed via stdin**, never interpolated into `agent_command`. 
 - Events: `AgentStarted`, `AgentOutput(chunk)`, `AgentCompleted(exit_code)`, `AgentTimedOut`
 - On timeout: retry with identical prompt (shared `max_retries` counter)
 - On non-zero exit: no retry, record as failed
-- SIGINT/SIGTERM: kill subprocess, re-raise; `running` record remains (next run shows NEEDS_CONFIRMATION)
+- SIGINT/SIGTERM: kill subprocess, re-raise; `running` record remains (next run shows NEEDS_CONFIRMATION → after user confirms, overwrite with a new `running` record using same base_commit and re-run task from scratch)
 - Lock released in `finally` block wrapping entire run
 
 ---
@@ -130,11 +131,12 @@ Prompt is **always passed via stdin**, never interpolated into `agent_command`. 
 **New:** `verification.py`; extends `task_run.py`
 
 - Verifications run only after agent exits with code 0; non-zero exit skips verification → fail path
-- Run verifications in lexicographic order; each invoked with `cwd=<root>/src/`; **halt on first FAIL** (do not run subsequent verifications)
+- **No verification files** (empty or absent `verifications/` dir): skip verification entirely, treat as all-pass, proceed to complete
+- Run verifications in lexicographic order of filename; each invoked with `cwd=<root>/src/`; **halt on first FAIL** (do not run subsequent verifications)
 - **Verification prompt structure** (per spec appendix): reproduce verification file content verbatim, then append a reference to the task instructions ("`The task instructions are in .agent-context/task/TASK.md. Read them before making your assessment.`"), then append the structured response instruction ("`Respond with a single JSON object on the last line of your output. Do not include any text after the JSON object. { "status": "PASS" | "FAIL", "reasoning": "<brief explanation>" }`")
 - Parse **last non-empty line** of output as `{"status": "PASS"|"FAIL", "reasoning": "..."}`
-- Empty/whitespace output or non-zero exit → FAIL with synthetic reasoning (no propagated exception)
-- First FAIL: append reasoning to original prompt, retry agent (only most recent reasoning, not accumulated)
+- Empty/whitespace output, non-zero exit, **timeout (kill subprocess)**, or non-JSON → FAIL with synthetic reasoning (no propagated exception); verification timeout counts as one retry
+- **Retry prompt format** (per spec appendix): original prompt verbatim, then `---` separator, then `"The following verification failed. Review the reasoning and correct the issue."`, then `Verification: .agent-context/verifications/<id>.md`, then `Reasoning: <reasoning>`; only the most recent failure is appended (not accumulated)
 - Timeout + verification-failure retries share `max_retries`; exhausted → `failed` record, non-zero exit, `src/` left as-is
 
 ---
@@ -189,9 +191,21 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 
 **`project.py` validation.** Abort if any task directory lacks `TASK.md`; abort if `tasks/` has no subdirectories (distinct error from `tasks/` absent).
 
-**Lock file atomicity.** Use `O_CREAT | O_EXCL | O_WRONLY`. Lock released in `finally` block including on `KeyboardInterrupt`.
+**Lock file location.** Must be `<project_root>/.agent-build.lock`. Use `O_CREAT | O_EXCL | O_WRONLY`. Lock released in `finally` block including on `KeyboardInterrupt`.
 
 **Conditional global prompt.** Include global-instructions paragraph in prompt only when `GLOBAL.md` was actually copied.
+
+**`.agent-context/` must be gitignored.** `workspace.py` must append `.agent-context` to `src/.gitignore` before copying context files (create file if absent). Without this: a failed run leaves untracked files that trigger preflight dirty-tree warnings on every subsequent run and cause rollback to abort with "untracked files" error.
+
+**Empty verifications directory.** If `verifications/` has no `.md` files, skip verification phase entirely and proceed directly to complete. Do not abort.
+
+**Verification subprocess timeout.** Kill subprocess → treat as non-zero exit → FAIL with synthetic reasoning → consumes one retry from `max_retries`. Uses `verification_timeout_seconds` (not `agent_timeout_seconds`).
+
+**NEEDS_CONFIRMATION resolution.** After user confirms, discard the stale `running` record by overwriting it with a new `running` record (preserving `base_commit` from the original) and run the task from scratch.
+
+**Retry prompt construction.** On verification failure, the agent retry prompt is: `{original_prompt}\n\n---\n\nThe following verification failed. Review the reasoning and correct the issue.\n\nVerification: \`.agent-context/verifications/{id}.md\`\n\nReasoning:\n{reasoning}`. Only the most recent failure is appended; earlier failures are not accumulated. On timeout retry, the prompt is the original unchanged.
+
+**Live record updates.** `results.py` must subscribe to agent events to update the `running` record with accumulated metrics (input/output tokens, timing) as they arrive — not only at run end. This ensures metrics are partially captured even if the process is killed.
 
 ---
 
@@ -204,10 +218,11 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 - `project.py`: lexicographic sort of `001-a`, `001b-extra`, `002-b`; alphanumeric IDs accepted; missing `TASK.md` → `ProjectError`; empty `tasks/` → `ProjectError`
 - `results.py`: malformed JSON → `ResultsStoreError`; `check_consistency()` detects broken chain; `write()` creates dir; archive order logic; atomic temp-rename
 - `resume.py`: consistency check → ERROR before discrepancy check; `ResultsStoreError` → ERROR; discrepancy → ERROR; all `skipped` → COMPLETE; gap in records → ERROR
-- `preflight.py`: `O_EXCL` atomicity; stale lock PID scenarios; `src/` absent → error
+- `preflight.py`: `O_EXCL` atomicity at `.agent-build.lock`; stale lock PID scenarios; `src/` absent → error
+- `workspace.py`: `.agent-context` added to `src/.gitignore` if absent; gitignore file created if needed
 - `agent.py`: prompt via stdin not argv; `cwd=src/`; SIGINT kills subprocess
-- `verification.py`: last non-empty line; empty/non-zero/non-JSON → FAIL with synthetic reasoning; `cwd=src/`; timeout uses `verification_timeout_seconds`
-- `task_run.py`: `max_retries` exhausted → `failed` + non-zero exit; shared retry counter across timeout+verification failures; lock released on unhandled exception; `running` record includes `base_commit`; global prompt conditional
+- `verification.py`: last non-empty line; empty/non-zero/non-JSON/timeout → FAIL with synthetic reasoning; `cwd=src/`; timeout uses `verification_timeout_seconds`; no verification files → skip (all-pass)
+- `task_run.py`: `max_retries` exhausted → `failed` + non-zero exit; shared retry counter across timeout+verification failures; lock released on unhandled exception; `running` record includes `base_commit`; global prompt conditional; NEEDS_CONFIRMATION → new `running` record overwrites old, task re-runs from scratch; retry prompt format matches spec appendix (only most recent verification reasoning appended)
 - `rollback.py`: broken `previousResults` chain → abort before file changes; `previousResults: null` path
 
 ### Critical Integration Tests
