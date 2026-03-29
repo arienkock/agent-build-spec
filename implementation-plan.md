@@ -142,6 +142,7 @@ The conditional global block is included if and only if `src/.agent-context/glob
 - Events: `AgentStarted`, `AgentOutput(chunk)`, `AgentCompleted(exit_code)`, `AgentTimedOut`
 - Timeout → retry with identical original prompt (shared `max_retries` counter)
 - Non-zero exit → no retry → `failed` record
+- **`OSError` on subprocess launch (binary not found, not executable, permission denied):** catch `OSError` around the `subprocess.Popen` call; treat as a hard failure — write `failed` record with synthetic error message, do not retry. Never let the exception propagate past `agent.py` without writing a record and releasing the lock.
 - SIGINT/SIGTERM: kill subprocess, re-raise; `running` record remains. Next run shows NEEDS_CONFIRMATION → after user confirms, **read `base_commit` from the existing running record first**, then overwrite with a new `running` record using that preserved `base_commit`, and re-run from scratch. The read-then-overwrite must be treated as an atomic sequence within the task run orchestration — do not overwrite until `base_commit` is safely in memory.
 - Lock released in `finally` block (including `KeyboardInterrupt`)
 - Live metric updates: subscribe to agent events and update `running` record with partial token/timing metrics as they arrive
@@ -157,6 +158,8 @@ The conditional global block is included if and only if `src/.agent-context/glob
   - `The task instructions are in .agent-context/task/TASK.md. Read them before making your assessment.`
   - `Respond with a single JSON object on the last line of your output. Do not include any text after the JSON object. { "status": "PASS" | "FAIL", "reasoning": "<brief explanation>" }`
 - Parse **last non-empty line** as `{"status": "PASS"|"FAIL", "reasoning": "..."}`. Empty/whitespace, non-zero exit, timeout, or non-JSON → FAIL with synthetic reasoning (never propagate parse exception). Timeout uses `verification_timeout_seconds`.
+- **`OSError` on verification subprocess launch:** same rule as agent — catch `OSError` around `subprocess.Popen`; treat as FAIL with synthetic reasoning. Do not propagate the exception.
+- **SIGINT/SIGTERM during verification:** kill the verification subprocess, re-raise the signal. The outer `finally` block releases the lock; the `running` record is left in place (same as agent SIGINT). The next run detects NEEDS_CONFIRMATION and re-runs the full task (workspace is already prepared — no re-copy needed, but verifications restart from the beginning).
 - **Retry prompt** (per spec appendix): `{original_prompt}\n\n---\n\nThe following verification failed. Review the reasoning and correct the issue.\n\nVerification: \`.agent-context/verifications/{id}.md\`\n\nReasoning:\n{reasoning}` — only most recent failure appended, not accumulated. `{id}` = filename stem of the verification file (filename without the `.md` extension, e.g. `01-check-output` for `01-check-output.md`).
 - Timeout and verification-failure retries share `max_retries`; exhausted → `failed` record, non-zero exit, `src/` left as-is for inspection
 
@@ -173,6 +176,8 @@ Guards checked in order before touching any files:
 4. If `previousResults` non-null: verify referenced archive exists and is valid JSON
 
 Actions: restore `src/` to base commit; delete latest record; if `previousResults` non-null, rename (move) archive to be the new latest record (not copy — archive file is consumed); create new commit (no history rewrite) staging `src/` and `results/`. `previousResults: null` → delete latest record only; `src/` revert still committed.
+
+**Rollback partial failure (HIGH):** All git operations and record mutations must be sequenced so that no record file is modified until all git filesystem operations succeed. Order: (1) `git checkout <base_commit> -- src/`, (2) delete latest record, (3) rename archive → latest if applicable, (4) `git add src/ results/`, (5) `git commit`. If step 5 fails (e.g., pre-commit hook), `src/` and records are already mutated but no new commit exists. The system **MUST** surface this as a clear error with the current state described ("`src/` has been reset, results records updated, but the rollback commit could not be created"). Do not attempt to undo the filesystem mutations — the user can inspect and manually commit or revert. This is an acceptable known failure mode.
 
 ---
 
@@ -194,8 +199,8 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 | `resume.py` | Consistency → ERROR before discrepancy; all skipped → COMPLETE; gap → ERROR; running at last → NEEDS_CONFIRMATION; running not at last → ERROR; failed → READY; completed with remaining → READY (next) |
 | `preflight.py` | `O_EXCL` atomicity; stale PID with mismatched cmdline → refuse; absent PID → acquire; `src/` absent → error; corrupted/non-parseable lock file → refuse with error message naming lock file path; tmp `.tmp` files deleted before dirty-tree check (not after) |
 | `workspace.py` | `.agent-context` added to gitignore; no duplicate append; global absent → skip; existing `.agent-context/` triggers confirm |
-| `agent.py` | Prompt via stdin not argv; `cwd=src/`; SIGINT kills subprocess; timeout → kill + timeout event; on resume after SIGINT, `base_commit` read from existing running record before overwrite |
-| `verification.py` | Last non-empty line parsed; empty/non-JSON/timeout → FAIL; `cwd=src/`; timeout uses `verification_timeout_seconds`; no files → skip; lexicographic order; halt on first FAIL; retry `{id}` is filename stem not full filename |
+| `agent.py` | Prompt via stdin not argv; `cwd=src/`; SIGINT kills subprocess; timeout → kill + timeout event; on resume after SIGINT, `base_commit` read from existing running record before overwrite; `OSError` on launch → `failed` record + clear message, no retry |
+| `verification.py` | Last non-empty line parsed; empty/non-JSON/timeout → FAIL; `cwd=src/`; timeout uses `verification_timeout_seconds`; no files → skip; lexicographic order; halt on first FAIL; retry `{id}` is filename stem not full filename; `OSError` on launch → FAIL with synthetic reasoning; SIGINT → kill subprocess + re-raise |
 | `task_run.py` | `max_retries` exhausted → failed + non-zero exit; lock released on exception; global prompt conditional on GLOBAL.md actually copied; retry prompt format (latest failure only); agent non-zero → verification skipped; `.agent-context/` removed on success only; commit aborts cleanly if no changes; timeout retry uses original unchanged prompt; explicit targeting with failed intermediate → abort before confirmation; `base_commit` from prior running record preserved into new running record (read before overwrite, not after) |
 | `results.py` | Malformed JSON → `ResultsStoreError`; non-existent → `None`; archive numbering with gaps; atomic write; `check_consistency()` detects broken chain; `write()` creates results dir if absent |
 | `rollback.py` | Missing `previousResults` file → abort before changes; null chain → delete only; skipped → abort; missing base commit → abort; guard order enforced; archive file is moved not copied — original archive absent after successful rollback |
@@ -209,7 +214,9 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 - **Verification retry:** FAIL → retry with latest reasoning only; all PASS → completed; non-zero exit → fail without verification
 - **Agent timeout:** subprocess killed → retry with original prompt; `max_retries=1` always-timing-out → `failed`
 - **Verification exhaustion:** `max_retries=1` always-failing verification → `failed`; lock released; `src/` left as-is
-- **Rollback:** `src/` reverted, new commit, record chain restored; blocked by dirty tree; blocked by skipped record
+- **Rollback:** `src/` reverted, new commit, record chain restored; blocked by dirty tree; blocked by skipped record; git commit failure after record mutations → clear error describing partial state, no silent crash
+- **Agent binary not found:** `agent_command` points to non-existent binary → `OSError` caught → `failed` record written → lock released cleanly
+- **SIGINT during verification:** verification subprocess killed, lock released, `running` record persists; next run → NEEDS_CONFIRMATION
 - **Explicit targeting:** intermediate tasks get skipped records; discrepancy check aborts before confirmation; intermediate task with `failed` record aborts before confirmation
 - **SIGINT:** subprocess killed, running record remains, lock released; next run → NEEDS_CONFIRMATION; confirm → re-runs from scratch; `base_commit` in new running record matches value from the interrupted running record (not a fresh HEAD)
 - **Startup tmp cleanup:** `.tmp` file in `results/` left by crashed write → deleted at startup → dirty-tree check passes → run proceeds normally
