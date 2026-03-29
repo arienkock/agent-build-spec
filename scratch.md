@@ -50,7 +50,7 @@ A Task is a unit of work represented by a subdirectory within `tasks/`. All the 
 
 ### Verification
 
-A Verification is a validation check defined by a file in the `verifications/` directory, each named with a unique verification ID (e.g., `001-unit-tests`, `002-lint`, `001b-smoke`). Verification filenames **SHOULD** begin with an alphanumeric prefix to make ordering explicit and unambiguous. Verifications **MAY** define shell commands (e.g. `pytest`, `npm run test`, `./integration-tests.sh`) that are executed with `src/` as the working directory; a verification passes when its command exits with a zero status code. It is **RECOMMENDED** that the first task scaffolds a project structure that allows all verification commands to pass when run from `src/`. It is also **RECOMMENDED** that this scaffolding task creates a `.gitignore` to prevent build artifacts and other unwanted files from being included in automatic commits.
+A Verification is a validation check defined by a Markdown file in the `verifications/` directory, each named with a unique verification ID (e.g., `001-unit-tests`, `002-lint`, `001b-smoke`). Verification filenames **SHOULD** begin with an alphanumeric prefix to make ordering explicit and unambiguous. Each verification is evaluated by a dedicated verification agent: the system passes the verification file to the agent (with a structured response instruction appended), the agent performs the described checks — which may include running shell commands in the workspace — and responds with `{ "status": "PASS" | "FAIL", "reasoning": "..." }`. A verification passes when the agent returns `"status": "PASS"`. It is **RECOMMENDED** that the first task scaffolds a project structure that allows all verifications to pass from the outset. It is also **RECOMMENDED** that this scaffolding task creates a `.gitignore` to prevent build artifacts and other unwanted files from being included in automatic commits.
 
 ### Global Instructions
 
@@ -135,13 +135,13 @@ The system **SHOULD** provide live progress feedback to the user while the agent
 
 ### Verification Execution
 
-Upon agent completion, verifications are executed in lexicographical order of their ID. The first failing verification halts further verification. Its output **MAY** be summarized, and **MUST** be appended to the original task prompt (before any retries) before re-invoking the agent as a retry.
+Upon agent completion, verifications are executed in lexicographical order of their ID. The first verification that returns `"status": "FAIL"` halts further verification. The verification agent's `reasoning` **MUST** be appended to the original task prompt before re-invoking the implementation agent as a retry.
 
 ### Retries and Timeouts
 
 Preflight checks and workspace preparation occur once per task run, before the first agent invocation. Retries reuse the already-prepared workspace without repeating these steps.
 
-As noted in the Task Run concept, task runs **MUST** enforce configurable timeouts for both agent execution and verification execution. If the agent exceeds its timeout, the system **MUST** retry it with the same prompt that was used for the timed-out invocation. The retry prompt is intentionally identical to the original: capable agents are expected to inspect the workspace, identify what has already been done, and continue from there without explicit instruction. If the agent exits with a non-zero exit code, it is considered to have terminated with an error: no retry is attempted and the task run **MUST** be recorded as failed. Verification failures trigger a retry as described above; on each retry, only the output of the most recently failed verification is appended to the original prompt — earlier failure outputs are not accumulated. All retries — whether caused by timeouts or verification failures — draw from a single shared configurable retry limit.
+As noted in the Task Run concept, task runs **MUST** enforce configurable timeouts for both agent execution and verification execution. If the agent exceeds its timeout, the system **MUST** retry it with the same prompt that was used for the timed-out invocation. The retry prompt is intentionally identical to the original: capable agents are expected to inspect the workspace, identify what has already been done, and continue from there without explicit instruction. If the agent exits with a non-zero exit code, it is considered to have terminated with an error: no retry is attempted and the task run **MUST** be recorded as failed. Verification failures trigger a retry as described above; on each retry, only the reasoning from the most recently failed verification is appended to the original prompt — earlier failure outputs are not accumulated. All retries — whether caused by timeouts or verification failures — draw from a single shared configurable retry limit.
 
 On timeout or failure, the contents of `src/` **MUST** be left as-is. The workspace is not reset between automatic retries, nor after the retry limit is exhausted or an error terminates the run. This serves two purposes: it allows the user to inspect the partial state, and it allows the user to trigger an explicit additional run that picks up where the agent left off.
 
@@ -190,12 +190,84 @@ Complete the task. When you are done, stop. Verifications will be run automatica
 
 ---
 
-The following verification failed. Review the output and correct the issue.
+The following verification failed. Review the reasoning and correct the issue.
 
 Verification: `.agent-context/verifications/001-unit-tests.md`
-Exit code: 1
 
-Output:
-FAILED tests/test_auth.py::test_login_returns_token - AssertionError: expected 200, got 401
-1 failed, 14 passed in 3.21s
+Reasoning:
+Running `pytest` produced one failure: `test_login_returns_token` expected a 200
+response but received 401. The token endpoint appears to reject valid credentials.
+```
+
+## Example: Verification File (shell command)
+
+The following is an example of a verification file that instructs the verification agent to run a shell command and report on its output:
+
+```markdown
+# Verification: Unit Tests
+
+Run `pytest` in the workspace root and check whether all tests pass.
+
+If any tests fail, include the test names and assertion errors in your reasoning
+so the implementation agent can identify and fix them.
+```
+
+## Example: Verification File (qualitative check)
+
+The following is an example of a verification file that instructs the verification agent to perform a qualitative assessment:
+
+```markdown
+# Verification: Faithfulness to Task
+
+Read the task instructions and review the changes made to the workspace. Assess
+whether the implementation faithfully addresses what was asked — no more and
+no less.
+
+A faithful implementation:
+- Completes all requirements stated in the task.
+- Does not introduce unrequested features, structural changes, or refactors.
+- Does not leave scaffolding, placeholder code, or TODO comments where real
+  implementation was expected.
+```
+
+## Example: Verification Prompt (as seen by the verification agent)
+
+For each verification, the system reproduces the verification file content, provides a reference to the task file, and appends a structured response instruction:
+
+```
+# Verification: Faithfulness to Task
+
+Read the task instructions and review the changes made to the workspace. Assess
+whether the implementation faithfully addresses what was asked — no more and
+no less.
+
+A faithful implementation:
+- Completes all requirements stated in the task.
+- Does not introduce unrequested features, structural changes, or refactors.
+- Does not leave scaffolding, placeholder code, or TODO comments where real
+  implementation was expected.
+
+---
+
+The task instructions are in `.agent-context/task/TASK.md`. Read them before
+making your assessment.
+
+Respond with a single JSON object on the last line of your output. Do not include
+any text after the JSON object.
+
+{ "status": "PASS" | "FAIL", "reasoning": "<brief explanation>" }
+```
+
+An example agent response to this prompt:
+
+```
+I'll read the task instructions and then review the workspace changes.
+
+[... agent reasoning and file reads ...]
+
+The task asked for a login endpoint returning a token. The implementation includes
+that, but also adds an unrequested password reset flow and two helper utilities
+not mentioned anywhere in the instructions.
+
+{ "status": "FAIL", "reasoning": "Implementation includes an unrequested password reset flow and helper utilities not mentioned in the task." }
 ```
