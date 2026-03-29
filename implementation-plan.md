@@ -193,12 +193,13 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 | `project.py` | Lexicographic sort; missing `TASK.md` → error; empty `tasks/` → distinct error from absent |
 | `results.py` | Malformed JSON → `ResultsStoreError`; non-existent → `None`; archive numbering with gaps; atomic write; `check_consistency()` detects broken chain |
 | `resume.py` | Consistency → ERROR before discrepancy; all skipped → COMPLETE; gap → ERROR; running at last → NEEDS_CONFIRMATION; running not at last → ERROR; failed → READY; completed with remaining → READY (next) |
-| `preflight.py` | `O_EXCL` atomicity; stale PID with mismatched cmdline → refuse; absent PID → acquire; `src/` absent → error |
+| `preflight.py` | `O_EXCL` atomicity; stale PID with mismatched cmdline → refuse; absent PID → acquire; `src/` absent → error; corrupted/non-parseable lock file → refuse with error message naming lock file path; tmp `.tmp` files deleted before dirty-tree check (not after) |
 | `workspace.py` | `.agent-context` added to gitignore; no duplicate append; global absent → skip; existing `.agent-context/` triggers confirm |
-| `agent.py` | Prompt via stdin not argv; `cwd=src/`; SIGINT kills subprocess; timeout → kill + timeout event |
-| `verification.py` | Last non-empty line parsed; empty/non-JSON/timeout → FAIL; `cwd=src/`; timeout uses `verification_timeout_seconds`; no files → skip; lexicographic order; halt on first FAIL |
-| `task_run.py` | `max_retries` exhausted → failed + non-zero exit; lock released on exception; global prompt conditional on GLOBAL.md actually copied; retry prompt format (latest failure only); agent non-zero → verification skipped; `.agent-context/` removed on success only; commit aborts cleanly if no changes; timeout retry uses original unchanged prompt; explicit targeting with failed intermediate → abort before confirmation |
-| `rollback.py` | Missing `previousResults` file → abort before changes; null chain → delete only; skipped → abort; missing base commit → abort; guard order enforced |
+| `agent.py` | Prompt via stdin not argv; `cwd=src/`; SIGINT kills subprocess; timeout → kill + timeout event; on resume after SIGINT, `base_commit` read from existing running record before overwrite |
+| `verification.py` | Last non-empty line parsed; empty/non-JSON/timeout → FAIL; `cwd=src/`; timeout uses `verification_timeout_seconds`; no files → skip; lexicographic order; halt on first FAIL; retry `{id}` is filename stem not full filename |
+| `task_run.py` | `max_retries` exhausted → failed + non-zero exit; lock released on exception; global prompt conditional on GLOBAL.md actually copied; retry prompt format (latest failure only); agent non-zero → verification skipped; `.agent-context/` removed on success only; commit aborts cleanly if no changes; timeout retry uses original unchanged prompt; explicit targeting with failed intermediate → abort before confirmation; `base_commit` from prior running record preserved into new running record (read before overwrite, not after) |
+| `results.py` | Malformed JSON → `ResultsStoreError`; non-existent → `None`; archive numbering with gaps; atomic write; `check_consistency()` detects broken chain; `write()` creates results dir if absent |
+| `rollback.py` | Missing `previousResults` file → abort before changes; null chain → delete only; skipped → abort; missing base commit → abort; guard order enforced; archive file is moved not copied — original archive absent after successful rollback |
 
 ### Integration Tests
 
@@ -211,7 +212,8 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 - **Verification exhaustion:** `max_retries=1` always-failing verification → `failed`; lock released; `src/` left as-is
 - **Rollback:** `src/` reverted, new commit, record chain restored; blocked by dirty tree; blocked by skipped record
 - **Explicit targeting:** intermediate tasks get skipped records; discrepancy check aborts before confirmation; intermediate task with `failed` record aborts before confirmation
-- **SIGINT:** subprocess killed, running record remains, lock released; next run → NEEDS_CONFIRMATION; confirm → re-runs from scratch
+- **SIGINT:** subprocess killed, running record remains, lock released; next run → NEEDS_CONFIRMATION; confirm → re-runs from scratch; `base_commit` in new running record matches value from the interrupted running record (not a fresh HEAD)
+- **Startup tmp cleanup:** `.tmp` file in `results/` left by crashed write → deleted at startup → dirty-tree check passes → run proceeds normally
 - **Lexicographic ordering:** `001-a`, `001b-extra`, `002-b` sorted correctly
 - **Workspace overwrite:** confirm → delete + recopy; deny → abort
 - **Live metrics:** kill mid-run → partial metrics captured in running record
