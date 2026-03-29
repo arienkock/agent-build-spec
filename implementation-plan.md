@@ -321,6 +321,15 @@ Before touching any files, `rollback.py` must verify that the file named in `pre
 **results/ directory must be created by `write()` if absent.**
 Phase 1 states "results dir absent → all get_latest calls return None". Phase 2 adds `write()`. `write()` must `mkdir(parents=True, exist_ok=True)` before writing, otherwise the first write to a fresh project fails with `FileNotFoundError`.
 
+**Agent and verification subprocesses must be invoked with `cwd=src/`.**
+The spec states "the agent operates within the workspace." The constructed prompt references `.agent-context/task/TASK.md`, `.agent-context/global/GLOBAL.md`, and `.agent-context/verifications/` as relative paths. If the subprocess is launched from the project root, none of these paths resolve and the agent cannot find its instructions. Both `agent.py` and `verification.py` **MUST** set `cwd=<project_root>/src/` when invoking the subprocess. Failure to do so will silently produce empty or hallucinated agent output with no error — a very difficult bug to diagnose.
+
+**`project.py` must abort if a task directory is missing `TASK.md`.**
+The spec states: "if a task directory exists without a `TASK.md`, the system MUST abort with an error." `project.py` must check for the presence of `TASK.md` inside each discovered task subdirectory when loading the project, and raise a `ProjectError` immediately rather than returning a `Task` with no entrypoint. Discovering this at validation time (not at agent invocation time) prevents a confusing failure mid-run.
+
+**`project.py` must abort if `tasks/` contains no task subdirectories.**
+The spec states: "If `tasks/` contains no task subdirectories, the system MUST abort with an error." `project.py` must enforce this after scanning the `tasks/` directory. An empty `tasks/` directory is not the same as `tasks/` being absent (which is separately checked in preflight); both conditions must be caught and reported with distinct error messages.
+
 ---
 
 ## Key Design Principles
