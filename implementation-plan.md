@@ -195,15 +195,15 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 
 | Module | Key cases |
 |---|---|
-| `project.py` | Lexicographic sort; missing `TASK.md` → error; empty `tasks/` distinct from absent |
-| `resume.py` | Discrepancy check first (unknown task ID in latest AND archived filenames → ERROR); consistency check (archived without latest → ERROR); all skipped → COMPLETE; gap → ERROR; running at last → NEEDS_CONFIRMATION; running not at last → ERROR; failed → READY; completed with remaining → READY (next) |
+| `project.py` | Lexicographic sort; missing `TASK.md` → error; empty `tasks/` distinct from absent; task dir with no leading alphanumeric prefix → WARNING emitted (not error); valid formats accepted without warning (`001b-setup-extra`, `01.1-init`) |
+| `resume.py` | Discrepancy check first (unknown task ID in latest AND archived filenames → ERROR); consistency check (archived without latest → ERROR); no records → READY (first task); all tasks completed → COMPLETE; single completed task (last in list) → COMPLETE; all skipped → COMPLETE; gap → ERROR; running at last → NEEDS_CONFIRMATION; running not at last → ERROR; failed → READY; completed with remaining → READY (next) |
 | `preflight.py` | `O_EXCL` atomicity; stale PID with mismatched cmdline → refuse; absent PID → acquire; corrupted/empty lock file → refuse naming path; `.tmp` files deleted before dirty-tree check; empty repo (no HEAD commit) → abort; detached HEAD → abort |
 | `workspace.py` | `.agent-context` added to gitignore; no duplicate append; global absent → skip; existing `.agent-context/` triggers confirm |
 | `agent.py` | Prompt via stdin not argv; `cwd=src/`; SIGINT kills subprocess then `wait()` reaps zombie; timeout → kill + `wait()` + event; on resume after SIGINT, `base_commit` read before overwrite; `OSError` → `failed` record, no retry |
-| `verification.py` | Last non-empty line parsed; empty/non-JSON/timeout → FAIL; `cwd=src/`; timeout uses `verification_timeout_seconds`; no files → skip; lexicographic order; halt on first FAIL; retry `{id}` is filename stem; `OSError` → FAIL synthetic; SIGINT → kill + re-raise |
+| `verification.py` | Last non-empty line parsed; non-zero exit → FAIL with synthetic reasoning; empty/non-JSON/timeout → FAIL; `cwd=src/`; timeout uses `verification_timeout_seconds`; no files → skip; lexicographic order; halt on first FAIL; retry `{id}` is filename stem; `OSError` → FAIL synthetic; SIGINT → kill + re-raise |
 | `task_run.py` | `max_retries` exhausted → failed; lock released on exception; global prompt conditional on GLOBAL.md copied; retry prompt format (latest failure only); non-zero → verification skipped; `.agent-context/` removed on success only; commit aborts if no changes; timeout retry uses original prompt; explicit targeting with failed intermediate → intermediate left untouched, target task runs normally; non-existent task ID → abort before side effects; `base_commit` preserved from prior running record; shared counter: one timeout + one verification failure together exhaust `max_retries=2` |
-| `config.py` | Missing file → all defaults; negative timeout → validation error; extra fields ignored; `agent_command` with extra braces (e.g. `{0}`) → validation error or safe substitution, not runtime crash |
-| `results.py` | Malformed JSON → `ResultsStoreError`; non-existent → `None`; archive numbering with gaps; atomic write; `check_consistency()` detects broken chain; `write()` creates dir if absent |
+| `config.py` | Missing file → all defaults; zero timeout → validation error; negative timeout → validation error; extra fields ignored; `agent_command` with extra braces (e.g. `{0}`) → validation error or safe substitution, not runtime crash; `agent_command` split produces argv list (shell=False, no injection) |
+| `results.py` | Malformed JSON → `ResultsStoreError`; non-existent → `None`; archive numbering with gaps; atomic write; `check_consistency()` detects broken chain; `check_consistency()` returns empty set when all chains intact; `write()` creates dir if absent; skipped record serializes only `status` and `previousResults` fields; JSON uses camelCase keys (`previousResults`, `baseCommit`, `startTime`) |
 | `rollback.py` | Missing `previousResults` file → abort before changes; null chain → delete only; skipped → abort; missing base commit → abort; guard order enforced; archive moved not copied; no-op rollback → clear error, no empty commit |
 
 ### Integration Tests
@@ -224,3 +224,6 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 - **Zombie reaping:** agent killed mid-run (SIGINT) → `process.wait()` called → process not listed in zombie state
 - **Workspace overwrite:** confirm → delete + recopy; deny → abort
 - **Live metrics:** kill mid-run → partial metrics in running record
+- **Lock contention:** second concurrent `agent-build run` invocation while first holds lock → clear error, does not block or corrupt
+- **Missing config file:** no `agent-build.config.json` present → all defaults applied, run proceeds normally
+- **No-change commit:** agent makes no file changes in `src/` and `results/` unchanged → commit aborts with clear error, no empty commit created
