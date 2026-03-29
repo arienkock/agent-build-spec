@@ -393,6 +393,7 @@ All tests use `pytest`. Filesystem fixtures use `tmp_path`. No mocking of subpro
 - Last task `failed` → READY (re-run last task)
 - All tasks `completed` with more tasks remaining → READY (first unrecorded task)
 - All tasks `completed`, no further tasks → COMPLETE
+- **All tasks `skipped`, no further tasks → COMPLETE** (verify `skipped`-only history is treated as fully complete)
 - `skipped` treated as success: `[completed, skipped, <no record>]` → READY (third task)
 - Gap in records: tasks 1 and 3 `completed`, task 2 has no record → ERROR
 - Non-success intermediate: task 1 `completed`, task 2 `failed`, task 3 `completed` → ERROR
@@ -430,6 +431,7 @@ All tests use `pytest`. Filesystem fixtures use `tmp_path`. No mocking of subpro
 - **[HIGH]** Empty output → FAIL with synthetic reasoning string (no unhandled exception)
 - **[HIGH]** All-whitespace output → FAIL with synthetic reasoning string
 - **[HIGH]** Non-zero exit code from verification agent → FAIL with synthetic reasoning string
+- **[HIGH]** Verification subprocess exceeds `verification_timeout_seconds` → killed, returns FAIL with synthetic reasoning (verify that `verification_timeout_seconds` from config is passed as `timeout` argument to subprocess call)
 - Last non-empty line is not valid JSON → FAIL with synthetic reasoning (no `json.JSONDecodeError` propagated)
 - Valid PASS response → `("PASS", reasoning)` returned
 - Valid FAIL response → `("FAIL", reasoning)` returned
@@ -451,9 +453,10 @@ All tests use `pytest`. Filesystem fixtures use `tmp_path`. No mocking of subpro
 - **[HIGH]** After `max_retries` exhausted, status is `failed` (not `running`)
 - **[HIGH]** Unhandled exception after lock acquisition → lock file released via `finally` block (verify lock absent after exception)
 - **[HIGH]** Prompt excludes global-instructions paragraph when `GLOBAL.md` absent; includes it when present (verify prompt content via mock)
+- **[HIGH]** `running` record written before agent invocation must include `base_commit` field set to current HEAD (rollback depends on this value; verify via mock capturing written record content)
 - Timeout retry uses identical prompt (not modified)
 - Verification failure retry appends only the most recent failure reasoning (not accumulated)
-- Retry counter shared between timeout retries and verification-failure retries
+- **[HIGH]** Shared retry counter spans both timeout retries and verification-failure retries in sequence: `max_retries=2`, one timeout retry then one verification-failure retry → second retry attempt exhausts counter → `failed` record written (not just testing each type separately)
 - Non-zero agent exit code → no retry, immediate fail, no verification executed
 
 #### `rollback.py`
@@ -464,6 +467,7 @@ All tests use `pytest`. Filesystem fixtures use `tmp_path`. No mocking of subpro
 - Uncommitted changes present → abort with error
 - Untracked files present → abort with error
 - Happy path: `src/` restored to base commit, latest record deleted, archived record promoted to latest, new commit created
+- **`previousResults: null` → latest record deleted, no archive promoted, new commit created** (first-ever run rollback; no chain to restore)
 - Only `src/` restored; `tasks/`, `verifications/`, other `results/` files untouched
 
 #### `task_run.py` — commit staging
@@ -510,9 +514,14 @@ These use a real temporary git repo and a fake agent subprocess (writes a file t
 
 #### Explicit task targeting
 - `agent-build run 003-feature` with tasks 1 and 2 having no records: writes `skipped` records for 1 and 2 (with archiving), then runs 3
+- **[HIGH]** `agent-build run <task-id>` with a stale record for a deleted task ID → discrepancy check aborts before the explicit-target confirmation prompt is shown (no side effects, no `skipped` records written)
+- `agent-build run <task-id>` where intermediate tasks already have latest records → those records left untouched; only tasks with no record receive `skipped`
 
 #### Ordering edge cases (CRITICAL)
 - Tasks `001-a`, `001b-extra`, `002-b` all accepted and sorted lexicographically; resume logic uses that order
+
+#### SIGINT during agent execution (HIGH)
+- Start a real run; send SIGINT to the `agent-build` process mid-agent; verify: (a) the agent subprocess is killed (not left as orphan), (b) the `running` record remains (not overwritten with `failed`), (c) the lock file is released, (d) a subsequent `agent-build run` shows `NEEDS_CONFIRMATION`
 
 ---
 
