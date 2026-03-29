@@ -98,7 +98,9 @@ Prompt always passed via stdin, never interpolated into `agent_command`. Command
 
 ## Phase 2 — Preflight + Workspace + Commits
 
-**Preflight:** verify git repo, required dirs (`src/`, `tasks/`, `verifications/`), clean working tree (prompt if dirty), acquire lock at `<project_root>/.agent-build.lock` via `O_CREAT | O_EXCL | O_WRONLY`. Stale lock: check PID exists AND cmdline matches `agent-build`; refuse if unverifiable.
+**Preflight:** verify git repo, required dirs (`src/`, `tasks/`, `verifications/`), clean working tree (prompt if dirty), acquire lock at `<project_root>/.agent-build.lock` via `O_CREAT | O_EXCL | O_WRONLY`. Stale lock: check PID exists AND cmdline matches `agent-build`; refuse if unverifiable. **Non-parseable or corrupted lock file content is also "unverifiable" — refuse with a clear error naming the lock file path.**
+
+**Startup temp file cleanup (CRITICAL):** Before preflight dirty-tree check, scan and delete any `results/*.tmp` files left by a previously crashed atomic write. These files are git-untracked (in a tracked directory) and would otherwise permanently block the dirty-tree check with no user-actionable path forward. Perform this cleanup unconditionally at startup, before any other preflight step.
 
 **Workspace:** copy task dir → `src/.agent-context/task/`, `global/` → `src/.agent-context/global/` (skip if absent), `verifications/` → `src/.agent-context/verifications/`. Confirm before overwriting existing `.agent-context/`; if confirmed, delete then recopy.
 
@@ -140,7 +142,7 @@ The conditional global block is included if and only if `src/.agent-context/glob
 - Events: `AgentStarted`, `AgentOutput(chunk)`, `AgentCompleted(exit_code)`, `AgentTimedOut`
 - Timeout → retry with identical original prompt (shared `max_retries` counter)
 - Non-zero exit → no retry → `failed` record
-- SIGINT/SIGTERM: kill subprocess, re-raise; `running` record remains. Next run shows NEEDS_CONFIRMATION → after user confirms, overwrite with new `running` record (preserve `base_commit`) and re-run from scratch
+- SIGINT/SIGTERM: kill subprocess, re-raise; `running` record remains. Next run shows NEEDS_CONFIRMATION → after user confirms, **read `base_commit` from the existing running record first**, then overwrite with a new `running` record using that preserved `base_commit`, and re-run from scratch. The read-then-overwrite must be treated as an atomic sequence within the task run orchestration — do not overwrite until `base_commit` is safely in memory.
 - Lock released in `finally` block (including `KeyboardInterrupt`)
 - Live metric updates: subscribe to agent events and update `running` record with partial token/timing metrics as they arrive
 
@@ -155,7 +157,7 @@ The conditional global block is included if and only if `src/.agent-context/glob
   - `The task instructions are in .agent-context/task/TASK.md. Read them before making your assessment.`
   - `Respond with a single JSON object on the last line of your output. Do not include any text after the JSON object. { "status": "PASS" | "FAIL", "reasoning": "<brief explanation>" }`
 - Parse **last non-empty line** as `{"status": "PASS"|"FAIL", "reasoning": "..."}`. Empty/whitespace, non-zero exit, timeout, or non-JSON → FAIL with synthetic reasoning (never propagate parse exception). Timeout uses `verification_timeout_seconds`.
-- **Retry prompt** (per spec appendix): `{original_prompt}\n\n---\n\nThe following verification failed. Review the reasoning and correct the issue.\n\nVerification: \`.agent-context/verifications/{id}.md\`\n\nReasoning:\n{reasoning}` — only most recent failure appended, not accumulated
+- **Retry prompt** (per spec appendix): `{original_prompt}\n\n---\n\nThe following verification failed. Review the reasoning and correct the issue.\n\nVerification: \`.agent-context/verifications/{id}.md\`\n\nReasoning:\n{reasoning}` — only most recent failure appended, not accumulated. `{id}` = filename stem of the verification file (filename without the `.md` extension, e.g. `01-check-output` for `01-check-output.md`).
 - Timeout and verification-failure retries share `max_retries`; exhausted → `failed` record, non-zero exit, `src/` left as-is for inspection
 
 ---
