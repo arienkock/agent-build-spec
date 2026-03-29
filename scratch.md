@@ -46,11 +46,11 @@ Files in the verifications directory **MUST** be self-contained and **MUST NOT**
 
 ### Task
 
-A Task is a unit of work represented by a subdirectory within `tasks/`. All the task directories represent an ordered backlog of work. The task directory name **IS** the task ID; the order of tasks is defined by the lexicographical ordering of these IDs. Task directory names **SHOULD** begin with an alphanumeric prefix to make ordering explicit and unambiguous (e.g. `001-setup`, `002-auth`, `001b-setup-extra`, `01.1-init`). The task directory **MUST** contain a `TASK.md` file as the entrypoint for task instructions. Additional files **MAY** be included and referenced from `TASK.md` for progressive disclosure. Task instructions **MUST** be written in unstructured Markdown.
+A Task is a unit of work represented by a subdirectory within `tasks/`. All the task directories represent an ordered backlog of work. The task directory name **IS** the task ID; the order of tasks is defined by the lexicographical ordering of these IDs. Task directory names **SHOULD** begin with an alphanumeric prefix to make ordering explicit and unambiguous (e.g. `001-setup`, `002-auth`, `001b-setup-extra`, `01.1-init`). The task directory **MUST** contain a `TASK.md` file as the entrypoint for task instructions. Additional files **MAY** be included and referenced from `TASK.md` for progressive disclosure. Task instructions **MUST** be written in Markdown.
 
 ### Verification
 
-A Verification is a validation check defined by a file in the `verifications/` directory, each named with a unique verification ID (e.g., `<Verification ID>.md`). Verifications **MAY** define shell commands (e.g. `pytest`, `npm run test`, `./integration-tests.sh`) that are executed with `src/` as the working directory; a verification passes when its command exits with a zero status code. It is **RECOMMENDED** that the first task scaffolds a project structure that allows all verification commands to pass when run from `src/`. It is also **RECOMMENDED** that this scaffolding task creates a `.gitignore` to prevent build artifacts and other unwanted files from being included in automatic commits.
+A Verification is a validation check defined by a file in the `verifications/` directory, each named with a unique verification ID (e.g., `001-unit-tests`, `002-lint`, `001b-smoke`). Verification filenames **SHOULD** begin with an alphanumeric prefix to make ordering explicit and unambiguous. Verifications **MAY** define shell commands (e.g. `pytest`, `npm run test`, `./integration-tests.sh`) that are executed with `src/` as the working directory; a verification passes when its command exits with a zero status code. It is **RECOMMENDED** that the first task scaffolds a project structure that allows all verification commands to pass when run from `src/`. It is also **RECOMMENDED** that this scaffolding task creates a `.gitignore` to prevent build artifacts and other unwanted files from being included in automatic commits.
 
 ### Global Instructions
 
@@ -66,17 +66,18 @@ The Process Spec defines how an automated system executes tasks against the stru
 
 ### Resume Point
 
-The Resume Point is the task selected for execution before a Task Run begins. The system **MUST** determine an unambiguous resume point by inspecting the task results records in lexicographical task order. The resume point is unambiguous in exactly three cases:
+The Resume Point is the task selected for execution before a Task Run begins. The system **MUST** determine an unambiguous resume point by inspecting the task results records in lexicographical task order. The resume point is unambiguous in exactly four cases:
 
-- **No results exist** — begin from the first task.
-- **Last result was not a success** — re-run that task (this acts as an explicit additional retry).
-- **All tasks have a successful result** — the next task in lexicographical order is the resume point.
+- **No records exist** — begin from the first task.
+- **The latest record for the last recorded task is not a success** — re-run that task (this acts as an explicit additional retry). If the status is `running`, the system **MUST** require explicit user confirmation before proceeding, as this may indicate a concurrent or interrupted run; if confirmed, re-run that task from the beginning.
+- **All records are successful, and further tasks exist with no records** — the first task without a record is the resume point.
+- **All tasks have successful records and no further tasks exist** — the project is complete; there is nothing to run.
 
 Any other state — such as a failed or missing result for an intermediate task followed by a successful result for a later task — is ambiguous. The system **MUST** abort with an error in such cases, requiring manual intervention before proceeding.
 
-As an exception, the user **MAY** explicitly request execution of a specific task out of sequence. The system **MUST** require explicit user confirmation before proceeding. If confirmed, the system **MUST** create placeholder results records with status `skipped` for all intermediate tasks that lack a result, making the state unambiguous before proceeding.
+As an exception, the user **MAY** explicitly request execution of a specific task out of sequence. The system **MUST** require explicit user confirmation before proceeding. If confirmed, the system **MUST** write a results record with status `skipped` for each intermediate task that has no latest record, following the normal archiving procedure. Intermediate tasks that already have a latest record are left untouched. This makes the state unambiguous before proceeding.
 
-The system **MUST** also compare the set of task directories on disk against the set of task IDs referenced in results records. If there is any discrepancy — a task exists on disk with no corresponding result, or a result references a task ID no longer present on disk — the system **MUST** require explicit user confirmation before proceeding. The system **MAY** assist the user in reconciling the differences (e.g. by listing the discrepancies and suggesting corrective actions).
+The system **MUST** perform a discrepancy check before resume point logic. If any results record references a task ID that no longer exists on disk, the task order is ambiguous and the system **MUST** abort with an error. The system **MAY** assist the user in reconciling the differences (e.g. by listing the discrepancies and suggesting corrective actions).
 
 ### Task Run
 
@@ -84,20 +85,16 @@ A Task Run is the complete execution cycle for a specific task, including prefli
 
 ### Results Records
 
-A Results Record is a JSON file that documents the outcome of a task run. The latest record for a task **MUST** be named `results-<Task ID>.json`. Before writing a new result, any existing latest record **MUST** be renamed to `results-<Task ID>--run-<Order>.json`, where `<Order>` is an incrementing integer derived from the count of existing archived records for that task. Archived records **MUST** be retained unless explicitly removed.
+A Results Record is a JSON file that documents the outcome of a task run. The latest record for a task **MUST** be named `results-<Task ID>.json`. Before writing a new result, any existing latest record **MUST** be renamed to `results-<Task ID>--run-<Order>.json`, where `<Order>` is `count_of_existing_archived_records + 1`, giving the first archived record `--run-1`. Archived records **MUST** be retained unless explicitly removed.
 
 The latest record **MUST** include a `previousResults` field containing the filename of the immediately preceding archived record, or `null` if no prior run exists. This creates an explicit history chain between records independent of the ordering counter.
 
 The record **MUST** include:
-- the base commit ID
+- the base commit ID (the HEAD commit at the start of the task run; preflight ensures this is a clean state unless the user has overridden that check)
 - start and end timestamps
 - task run status (running, skipped, completed, failed)
-- "cost & effort" metrics as returned by the agent
-
-Example cost and effort metrics:
-- CPU user, system, and IO time
-- input and output token count
-- monetary value of API usage
+- CPU user time, system time, and IO time
+- implementation-defined "cost & effort" metrics (e.g. input and output token count, monetary value of API usage)
 
 ## Task Run Process
 
@@ -111,20 +108,71 @@ Before initiating a task run, the system **MUST** verify that the project root i
 
 ### Workspace Preparation
 
-The agent operates in-place within `src/`. The system **MUST** copy the current task's directory, the global instructions, and all verification files into `src/` so the agent has access to them. The system **MUST** ensure that none of the copied paths conflict with paths already present in `src/`; if a conflict is detected, the task run **MUST** abort with an error.
+The agent operates in-place within `src/`. The system **MUST** copy context files into `src/.agent-context/` using the following canonical layout before invoking the agent:
+
+```
+.agent-context/
+├── task/          # contents of the current task directory
+├── global/        # contents of global/
+└── verifications/ # contents of verifications/
+```
+
+The system **MUST** ensure that `src/.agent-context/` does not already exist before copying; if it does, the task run **MUST** abort with an error. The error **SHOULD** indicate that a previous run likely left the directory behind and that it must be removed before proceeding. The system **MAY** offer to remove it on the user's behalf.
 
 ### Agent Invocation
 
-The agent is invoked as a non-interactive subprocess with captured STDIO. The agent operates within the workspace and **MUST NOT** alter the parent terminal state. Agents **MAY** optionally return token cost metrics.
+The agent is invoked as a non-interactive subprocess with captured STDIO. The agent operates within the workspace and **MUST NOT** alter the parent terminal state.
 
 ### Verification Execution
 
-Upon agent completion, verifications are executed in lexicographical order of their ID. The first failing verification halts further verification. Its output **MAY** be summarized, and **MUST** be appended to the original agent prompt before re-invoking the agent as a retry.
+Upon agent completion, verifications are executed in lexicographical order of their ID. The first failing verification halts further verification. Its output **MAY** be summarized, and **MUST** be appended to the original task prompt (before any retries) before re-invoking the agent as a retry.
 
 ### Retries and Timeouts
 
-Task runs **MUST** support a configurable timeout for agent execution. If the agent exceeds this timeout, the system **MUST** retry it with the same original prompt, up to a configurable retry limit. If the agent terminates with an error, no retry is attempted and the task run **MUST** be recorded as failed. Verification failures trigger a retry as described above, also subject to a configurable retry limit.
+Task runs **MUST** support a configurable timeout for agent execution. If the agent exceeds this timeout, the system **MUST** retry it with the same prompt that was used for the timed-out invocation, up to a configurable retry limit. The retry prompt is intentionally identical to the original: capable agents are expected to inspect the workspace, identify what has already been done, and continue from there without explicit instruction. If the agent terminates with an error, no retry is attempted and the task run **MUST** be recorded as failed. Verification failures trigger a retry as described above, also subject to a configurable retry limit.
 
 ### Result Recording and Commit
 
-Before committing, the system **MUST** remove the copied task, global instructions, and verification files from `src/`. Successful task runs **MUST** then append a results record and create a commit.
+Before committing, the system **MUST** remove `src/.agent-context/`. Successful task runs **MUST** then append a results record and create a commit.
+
+---
+
+# Appendix: Example Prompts
+
+The following examples illustrate how a compliant system might construct prompts for agent invocation. The exact wording and format are left to the implementing system.
+
+## Example: Initial Task Prompt
+
+```
+You are a coding agent.
+
+Your task instructions are in `.agent-context/task/TASK.md`. Read them before doing
+anything else. The file may reference additional files within `.agent-context/task/`
+for progressive disclosure — load them as needed.
+
+Global instructions that apply to all tasks are in `.agent-context/global/GLOBAL.md`.
+Read these before beginning work.
+
+Verification checks that will be run against your output are defined as files in
+`.agent-context/verifications/`. You MAY review them in advance to understand what
+success looks like.
+
+Complete the task. When you are done, stop. Verifications will be run automatically.
+```
+
+## Example: Verification Retry Prompt
+
+```
+[The original task prompt, reproduced in full]
+
+---
+
+The following verification failed. Review the output and correct the issue.
+
+Verification: `.agent-context/verifications/001-unit-tests.md`
+Exit code: 1
+
+Output:
+FAILED tests/test_auth.py::test_login_returns_token - AssertionError: expected 200, got 401
+1 failed, 14 passed in 3.21s
+```
