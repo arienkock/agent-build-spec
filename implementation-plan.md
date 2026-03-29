@@ -98,10 +98,11 @@ class ResumePoint:
 
 ### results.py — ResultsStore
 
-- `get_latest(task_id) -> Optional[ResultRecord]`
+- `get_latest(task_id) -> Optional[ResultRecord]` — raises `ResultsStoreError` on malformed JSON
 - `list_task_ids_in_store() -> set[str]` — all task IDs referenced by any record file
   (used for discrepancy check; parses both latest and archived filenames)
-- Results dir absent → all `get_latest` calls return `None` (no error)
+- `check_consistency() -> list[str]` — returns task IDs that have archived records but no latest record (atomic archive failure detection)
+- Results dir absent → all `get_latest` calls return `None`; `check_consistency()` returns `[]`
 
 Record filenames:
 - Latest:   `results-<Task ID>.json`
@@ -128,7 +129,8 @@ Skipped records contain only `status` and `previousResults`.
 ### resume.py — determine_resume_point()
 
 Algorithm (in order):
-1. **Discrepancy check** — any record file references a task ID not in `project.tasks` → ERROR
+0. **Consistency check** — any task ID has archived records but no latest record (atomic archive failure) → ERROR
+1. **Discrepancy check** — any record file references a task ID not in `project.tasks` → ERROR; catch `ResultsStoreError` from any `get_latest()` call and convert to ERROR
 2. **Multiple running tasks** → ERROR
 3. **No records at all** → READY (first task)
 4. Find `last_task`: highest-ordered task that has a latest record
@@ -234,7 +236,7 @@ partial workspace state preserved on failure.
   a non-zero exit code skips verification entirely and goes directly to the retry/fail path
 - Each verification: invoke agent with verification file content + task reference +
   structured response instruction appended
-- Parse last line of output as `{"status": "PASS"|"FAIL", "reasoning": "..."}`
+- Parse the **last non-empty line** of output as `{"status": "PASS"|"FAIL", "reasoning": "..."}`
 - First FAIL halts further verifications; append reasoning to original prompt; retry agent
 - On retry: only the most recent failure reasoning is appended (not accumulated)
 - All retries (timeout + verification failure) draw from shared `max_retries` counter
@@ -288,7 +290,7 @@ partial workspace state preserved on failure.
 ### CRITICAL
 
 **Task ordering must be explicitly lexicographic on task IDs.**
-The resume algorithm relies on "highest-ordered task that has a latest record" and "all tasks before last_task". If task IDs are not zero-padded (e.g. `task-9` vs `task-10`), lexicographic sort gives wrong order. The spec must require zero-padded numeric prefixes, and `project.py` must sort by the full ID string and reject non-conforming names at load time.
+The resume algorithm relies on "highest-ordered task that has a latest record" and "all tasks before last_task". The spec allows alphanumeric prefixes including formats like `001b-setup-extra` and `01.1-init` — it SHOULD (not MUST) use them; it does NOT restrict to purely zero-padded numeric. Therefore `project.py` **MUST NOT** reject valid spec-compliant alphanumeric IDs. Instead: sort all task IDs by lexicographic order of their full directory name string, and emit a WARNING (not an error) if any task directory name has no leading alphanumeric prefix at all (e.g. bare names like `setup` with no numeric component), since these are likely to produce unintended ordering. Never silently sort by discovery order.
 
 **Shell injection via task file content in agent_command.**
 `{prompt}` is substituted into `agent_command` which is executed as a shell command. Task file content read from disk becomes part of that substitution. Pass the prompt via `stdin` or a temp file, or use `subprocess` with an argument list (never `shell=True`). Do not interpolate file content directly into the command string.
@@ -299,10 +301,10 @@ A PID recorded in the lock file may be reused by an unrelated process after the 
 ### HIGH
 
 **Malformed or partial result record JSON.**
-A crash during an atomic write (after temp-file creation, before rename) leaves only the temp file; the latest record is intact. But a crash during the rename on some filesystems can corrupt the target. `ResultsStore.get_latest()` must catch `json.JSONDecodeError` and treat it as an ERROR-level resume condition (not silently return `None`), so the user knows manual intervention is needed.
+A crash during an atomic write (after temp-file creation, before rename) leaves only the temp file; the latest record is intact. But a crash during the rename on some filesystems can corrupt the target. `ResultsStore.get_latest()` must catch `json.JSONDecodeError` and **raise a `ResultsStoreError`** (a dedicated exception class defined in `results.py`) rather than returning `None` or propagating a bare `JSONDecodeError`. `resume.py` must catch `ResultsStoreError` when calling `get_latest()` and immediately return `ResumePoint(kind=ERROR, message=...)`, so the user knows manual intervention is needed. The `get_latest() -> Optional[ResultRecord]` signature remains unchanged; the error path uses exceptions, not a sentinel return value.
 
 **Atomic archive failure leaves no latest record.**
-`write()` archives the existing latest record first, then writes the new one. If the process dies between those two steps, there is no latest record but an archived one exists. On next load, `get_latest()` returns `None` for that task while archived records exist — this is an inconsistent state. `ResultsStore` should detect this (archived records exist but no latest) and surface it as an ERROR resume condition.
+`write()` archives the existing latest record first, then writes the new one. If the process dies between those two steps, there is no latest record but an archived one exists. On next load, `get_latest()` returns `None` for that task while archived records exist — this is an inconsistent state. `ResultsStore` should detect this via a new method **`check_consistency() -> list[str]`** that returns the list of task IDs with archived records but no latest record. `resume.py` **MUST** call `results_store.check_consistency()` as an explicit pre-step (before the discrepancy check) and return `ResumePoint(kind=ERROR, message=...)` if any are found. This pre-step must be documented in the `resume.py` algorithm: insert as new **step 0** before the existing discrepancy check.
 
 **Verification output: last non-empty line, not last line.**
 "Parse last line of output" must strip trailing newlines/whitespace and find the last non-empty line. If the verification agent produces no parseable JSON (empty output, all whitespace, or exits non-zero), treat as FAIL with a synthetic reasoning string — never propagate a parse exception as an unhandled crash.
