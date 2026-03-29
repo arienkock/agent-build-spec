@@ -94,7 +94,7 @@ class ResumePointKind(str, Enum):
 
 - Prompt passed via stdin, never in `agent_command`. Command split to argv list, `shell=False`.
 - Missing fields use per-field defaults; unknown fields ignored; zero/negative timeout → validation error.
-- **`{model}` substitution:** use `.format(model=model)` (keyword-only). Positional braces like `{0}` in user-supplied commands must raise a validation error, not cause a runtime `KeyError`.
+- **`{model}` substitution:** use `.format(model=model)` (keyword-only). Both positional placeholders like `{0}` (would raise `IndexError` at substitution time) and unknown named keys like `{unknown}` (would raise `KeyError`) must be caught at config validation time — not at runtime. Validation rule: after stripping `{model}`, any remaining `{...}` placeholder → validation error.
 
 ---
 
@@ -145,8 +145,8 @@ Complete the task. When you are done, stop. Verifications will be run automatica
 - Events: `AgentStarted`, `AgentOutput(chunk)`, `AgentCompleted(exit_code)`, `AgentTimedOut`
 - Timeout → retry with original prompt (shared `max_retries` counter); non-zero exit → no retry → `failed` record
 - `OSError` on launch → catch around `Popen`; write `failed` record, no retry, no propagation
-- **SIGINT/SIGTERM:** kill subprocess, then `process.wait()` to reap zombie before re-raising (HIGH: without `wait()`, stale-lock PID checks may incorrectly see the process as alive). `running` record remains. On next run: NEEDS_CONFIRMATION → read `base_commit` from existing running record before overwriting, then re-run from scratch.
-- Lock released in `finally` (including `KeyboardInterrupt`); live metrics update `running` record as events arrive
+- **SIGINT/SIGTERM (HIGH):** A SIGTERM signal handler must be installed (e.g., `signal.signal(signal.SIGTERM, handler)`) that raises an exception (e.g., `SystemExit` or a custom `TerminatedError`). Without this, Python's default SIGTERM behavior terminates the process immediately — skipping `finally` blocks, leaving the subprocess running (zombie risk), and leaking the lock. With the handler installed: kill subprocess, then `process.wait()` to reap zombie before re-raising (HIGH: without `wait()`, stale-lock PID checks may incorrectly see the process as alive). `running` record remains. On next run: NEEDS_CONFIRMATION → read `base_commit` from existing running record before overwriting, then re-run from scratch.
+- Lock released in `finally` (including `KeyboardInterrupt` and SIGTERM via installed handler); live metrics update `running` record as events arrive
 
 ---
 
@@ -203,7 +203,7 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 | `agent.py` | Prompt via stdin not argv; `cwd=src/`; SIGINT kills then `wait()` reaps; timeout → kill + `wait()` + event; resume preserves `base_commit`; `OSError` → `failed`, no retry |
 | `verification.py` | Last non-empty line parsed; non-zero → FAIL synthetic; empty/non-JSON/timeout → FAIL; `cwd=src/`; no files → skip; lexicographic halt on first FAIL; retry `{id}` is filename stem; `OSError` → FAIL synthetic; SIGINT → kill + re-raise |
 | `task_run.py` | `max_retries` exhausted → failed; lock released on exception; global prompt conditional; retry prompt format (latest failure only); non-zero → verification skipped; `.agent-context/` removed on success only; commit aborts if no changes; explicit targeting: failed intermediate left untouched; explicit targeting: completed target task archives old record and runs; shared counter: one timeout + one verification failure exhaust `max_retries=2`; workspace prep and preflight not repeated on timeout retry |
-| `config.py` | Missing file → all defaults; zero/negative timeout → validation error; extra fields ignored; `agent_command` with `{0}` → validation error; argv split for shell=False |
+| `config.py` | Missing file → all defaults; zero/negative timeout → validation error; extra fields ignored; `agent_command` with `{0}` → validation error; `agent_command` with `{unknown}` → validation error; `agent_command` with only `{model}` → valid; argv split for shell=False |
 | `results.py` | Malformed JSON → `ResultsStoreError`; non-existent → `None`; archive numbering with gaps; atomic write; consistency detects broken chain; `write()` creates dir if absent; skipped record serializes only `status` and `previousResults`; camelCase keys |
 | `rollback.py` | Missing `previousResults` file → abort before changes; null chain → delete only; skipped → abort; missing base commit → abort; guard order enforced; archive moved not copied; no-op → clear error, no empty commit |
 
