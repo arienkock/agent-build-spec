@@ -81,7 +81,7 @@ class ResumePointKind(str, Enum):
 2. Multiple `running` tasks → ERROR
 3. No records → READY (first task)
 4. Find `last_task`: highest-ordered task with a latest record
-5. All tasks before `last_task` must be `completed` or `skipped`; any gap or failure → ERROR
+5. All tasks before `last_task` must be `completed` or `skipped`; any other status (including `running`) or absent record → ERROR
 6. Evaluate `last_task`: `running` → NEEDS_CONFIRMATION; `failed` → READY (re-run); `completed`/`skipped` → READY (next unrecorded task) or COMPLETE (none remain)
 
 ### config.py Defaults
@@ -130,7 +130,7 @@ Prompt is **always passed via stdin**, never interpolated into `agent_command`. 
 **New:** `verification.py`; extends `task_run.py`
 
 - Verifications run only after agent exits with code 0; non-zero exit skips verification → fail path
-- Run verifications in lexicographic order; each invoked with `cwd=<root>/src/`
+- Run verifications in lexicographic order; each invoked with `cwd=<root>/src/`; **halt on first FAIL** (do not run subsequent verifications)
 - **Verification prompt structure** (per spec appendix): reproduce verification file content verbatim, then append a reference to the task instructions ("`The task instructions are in .agent-context/task/TASK.md. Read them before making your assessment.`"), then append the structured response instruction ("`Respond with a single JSON object on the last line of your output. Do not include any text after the JSON object. { "status": "PASS" | "FAIL", "reasoning": "<brief explanation>" }`")
 - Parse **last non-empty line** of output as `{"status": "PASS"|"FAIL", "reasoning": "..."}`
 - Empty/whitespace output or non-zero exit → FAIL with synthetic reasoning (no propagated exception)
