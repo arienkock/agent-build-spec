@@ -170,6 +170,8 @@ Complete the task. When you are done, stop. Verifications will be run automatica
 
 Command: `agent-build rollback`
 
+**Lock acquisition (HIGH):** Acquire the project lock (same `O_EXCL` mechanism as `run`) before any guards or file mutations. Without this, a concurrent `agent-build rollback` and `agent-build run` can corrupt both `src/` and `results/` records simultaneously. Apply the same stale-lock and unverifiable-lock rules as preflight; release in `finally`.
+
 **Guards (checked in order before touching files):**
 1. No uncommitted/untracked changes
 2. Latest record not `skipped`
@@ -205,7 +207,7 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 | `task_run.py` | `max_retries` exhausted → failed; lock released on exception; global prompt conditional; retry prompt format (latest failure only); non-zero → verification skipped; `.agent-context/` removed on success only; commit aborts if no changes; explicit targeting: failed intermediate left untouched; explicit targeting: completed target task archives old record and runs; shared counter: one timeout + one verification failure exhaust `max_retries=2`; workspace prep and preflight not repeated on timeout retry |
 | `config.py` | Missing file → all defaults; zero/negative timeout → validation error; extra fields ignored; `agent_command` with `{0}` → validation error; `agent_command` with `{unknown}` → validation error; `agent_command` with only `{model}` → valid; argv split for shell=False |
 | `results.py` | Malformed JSON → `ResultsStoreError`; non-existent → `None`; archive numbering with gaps; atomic write; consistency detects broken chain; `write()` creates dir if absent; skipped record serializes only `status` and `previousResults`; camelCase keys |
-| `rollback.py` | Missing `previousResults` file → abort before changes; null chain → delete only; skipped → abort; missing base commit → abort; guard order enforced; archive moved not copied; no-op → clear error, no empty commit |
+| `rollback.py` | Missing `previousResults` file → abort before changes; null chain → delete only; skipped → abort; missing base commit → abort; guard order enforced; archive moved not copied; no-op → clear error, no empty commit; lock already held → rollback aborted before any file mutation |
 
 ### Integration Tests
 
