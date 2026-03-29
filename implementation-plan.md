@@ -151,7 +151,7 @@ Loaded from `agent-build.config.json` at project root; falls back to defaults if
 Fields and defaults:
 ```json
 {
-  "agent_command": "claude --print --dangerously-skip-permissions --model {model} {prompt}",
+  "agent_command": "claude --print --dangerously-skip-permissions --model {model}",
   "model": "claude-sonnet-4-6",
   "agent_timeout_seconds": 600,
   "verification_timeout_seconds": 120,
@@ -159,7 +159,7 @@ Fields and defaults:
 }
 ```
 
-`{model}` and `{prompt}` are substituted at invocation time.
+`{model}` is substituted at invocation time. The prompt is **always passed via stdin** — it is never interpolated into the command string. The command is split into an argument list and executed with `subprocess` and `shell=False`; the prompt is written to the process's stdin after launch. This prevents shell injection via task file content.
 
 ---
 
@@ -178,7 +178,7 @@ Fields and defaults:
 - Write `running` record before agent stub; write `completed` record after
 - Archive existing latest record before writing new one (atomic: write temp → rename)
 - Remove src/.agent-context/ before committing
-- Abort with error if no changes in src/ or results/ to stage (nothing to commit)
+- Abort with error if there are no changes in **either** src/ **or** results/ to stage (i.e. both are empty — nothing to commit)
 - Create git commit staging only src/ and results/
 - task_run.py stub: preflight → workspace → write running record → (no agent yet, sleep 1s) →
   write completed record → cleanup → commit
@@ -230,7 +230,8 @@ partial workspace state preserved on failure.
 **Extended:** `task_run.py`
 
 **What it does:**
-- After agent completes: run verifications in lexicographical order
+- After agent completes **with exit code 0**: run verifications in lexicographical order;
+  a non-zero exit code skips verification entirely and goes directly to the retry/fail path
 - Each verification: invoke agent with verification file content + task reference +
   structured response instruction appended
 - Parse last line of output as `{"status": "PASS"|"FAIL", "reasoning": "..."}`
