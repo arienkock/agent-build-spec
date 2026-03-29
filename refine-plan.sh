@@ -13,13 +13,14 @@ function runClaude() {
     echo "LGTM received. Incrementing count."
     LGTM_COUNT=$((LGTM_COUNT + 1))
   fi
-
-  function claudeNoCount() {
-    local prompt="$1"
-    echo "----------------------------------------"
-    echo "Running Claude with prompt: $prompt"
-    claude --print --dangerously-skip-permissions "Read and the implementation-plan.md first. $prompt."
-  }
+  git add implementation-plan.md
+  git commit -m "Refined implementation plan. Prompt: $prompt"
+}
+function claudeNoCount() {
+local prompt="$1"
+echo "----------------------------------------"
+echo "Running Claude with prompt: $prompt"
+claude --print --dangerously-skip-permissions "Read and the implementation-plan.md first. $prompt."
 }
 
 for i in {1..7}; do
