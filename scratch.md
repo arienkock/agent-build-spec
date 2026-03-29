@@ -121,7 +121,9 @@ The system **MUST** ensure that `src/.agent-context/` does not already exist bef
 
 ### Agent Invocation
 
-The agent is invoked as a non-interactive subprocess with captured STDIO. The agent operates within the workspace and **MUST NOT** alter the parent terminal state.
+The agent is invoked as a non-interactive subprocess with captured STDIO. The agent operates within the workspace and **MUST NOT** alter the parent terminal state. The task runner **MUST** listen for asynchronous messages dispatched by the agent runner while it is executing, so that progress and status information can be acted upon without waiting for the subprocess to terminate.
+
+The system **SHOULD** provide live progress feedback to the user while the agent is running. If the agent implementation exposes token consumption or cost metrics via asynchronous messages, those **SHOULD** be surfaced in real time. Otherwise, the system **SHOULD** periodically report the net lines added and removed across all changes in `src/` relative to the base commit (including untracked, non-ignored files), as a lightweight signal that work is progressing.
 
 ### Verification Execution
 
