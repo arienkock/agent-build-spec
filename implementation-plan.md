@@ -333,6 +333,21 @@ The spec states: "if a task directory exists without a `TASK.md`, the system MUS
 **`project.py` must abort if `tasks/` contains no task subdirectories.**
 The spec states: "If `tasks/` contains no task subdirectories, the system MUST abort with an error." `project.py` must enforce this after scanning the `tasks/` directory. An empty `tasks/` directory is not the same as `tasks/` being absent (which is separately checked in preflight); both conditions must be caught and reported with distinct error messages.
 
+**Lock file must be acquired atomically.**
+`preflight.py` must create the lock file using `open(..., flags=os.O_CREAT | os.O_EXCL | os.O_WRONLY)` (or equivalent). A non-atomic approach — check-then-create — introduces a race window where two concurrent `agent-build run` invocations both observe no lock file and both proceed. The `O_EXCL` flag ensures only one process succeeds; the other gets `FileExistsError` and must treat it as a live lock (applying the PID-verification logic from the CRITICAL stale-lock note above).
+
+**Lock file must be released in a `finally` block.**
+`task_run.py` must release the lock file in a `try/finally` (or context manager) that wraps the entire run after the lock is acquired. Any unhandled exception that propagates out of `task_run.py` after lock acquisition — including `KeyboardInterrupt` — must still release the lock. Without this, a crash leaves a stale lock requiring manual removal on every subsequent run.
+
+**Signal handler must kill the agent subprocess.**
+If the user sends SIGINT (Ctrl+C) or the process receives SIGTERM during agent execution, the agent subprocess must be killed (not just left to run in the background as an orphan). `agent.py` must install a signal handler (or use `subprocess.Popen` within a `try/finally`) that calls `process.kill()` before re-raising the signal or letting the exception propagate. Without this, Ctrl+C during a long agent run leaves an orphaned subprocess still writing to `src/` — a confusing and potentially dangerous state. The `running` record will remain; the next run will encounter `NEEDS_CONFIRMATION`, which is correct behavior.
+
+**`src/` must exist and be checked in preflight.**
+The spec lists `src/` as a required top-level directory. `preflight.py` must explicitly check that `src/` exists and is a directory; if absent, abort with an error. Without `src/`, workspace preparation will fail with an obscure `FileNotFoundError` deep inside `workspace.py` rather than a clear preflight error. This check belongs alongside the `tasks/` and `verifications/` checks.
+
+**Agent prompt must conditionally omit global-instructions reference when `GLOBAL.md` is absent.**
+The example prompt includes a reference to `.agent-context/global/GLOBAL.md`. If `global/` is absent (or present but empty), that file does not exist in the agent's working directory. `task_run.py` must construct the prompt conditionally: include the global-instructions paragraph only when `GLOBAL.md` was actually copied into `.agent-context/global/`. Referencing a nonexistent file in the prompt may cause the agent to stall, hallucinate its contents, or return an error — all silent failures from the system's perspective.
+
 ---
 
 ---
@@ -393,6 +408,8 @@ All tests use `pytest`. Filesystem fixtures use `tmp_path`. No mocking of subpro
 - **[CRITICAL]** Lock file with PID of a running `agent-build` process → abort with error
 - **[CRITICAL]** Lock file with PID of a running unrelated process → refuse and require manual removal (not auto-remove)
 - **[CRITICAL]** Lock file with a non-existent PID → treat as stale, remove, proceed with informational message
+- **[HIGH]** Two concurrent processes attempt lock acquisition simultaneously → only one succeeds; the other sees `FileExistsError` and applies PID-verification logic (verify via `O_EXCL` mock that creation is atomic)
+- **[HIGH]** `src/` absent → abort with error (distinct message from `tasks/` absent)
 - No lock file → proceed normally, lock file created
 - Non-git directory → abort with error
 - `tasks/` absent → abort with error
@@ -422,6 +439,7 @@ All tests use `pytest`. Filesystem fixtures use `tmp_path`. No mocking of subpro
 #### `agent.py`
 - **[CRITICAL]** Prompt passed via stdin, never interpolated into command string (verify with mock that stdin receives prompt, argv does not)
 - **[HIGH]** Subprocess invoked with `cwd=<project_root>/src/` (verified via mock)
+- **[HIGH]** SIGINT during agent execution → subprocess killed, signal re-raised; no orphaned process left running
 - `AgentStarted` event emitted before subprocess starts
 - `AgentOutput` events emitted per output chunk
 - `AgentCompleted` event emitted with correct `exit_code`
@@ -431,6 +449,8 @@ All tests use `pytest`. Filesystem fixtures use `tmp_path`. No mocking of subpro
 #### `task_run.py` — retry logic
 - **[HIGH]** `max_retries` exhausted → `failed` record written, lock released, process exits non-zero; `src/` (including `.agent-context/`) is left as-is per spec
 - **[HIGH]** After `max_retries` exhausted, status is `failed` (not `running`)
+- **[HIGH]** Unhandled exception after lock acquisition → lock file released via `finally` block (verify lock absent after exception)
+- **[HIGH]** Prompt excludes global-instructions paragraph when `GLOBAL.md` absent; includes it when present (verify prompt content via mock)
 - Timeout retry uses identical prompt (not modified)
 - Verification failure retry appends only the most recent failure reasoning (not accumulated)
 - Retry counter shared between timeout retries and verification-failure retries
