@@ -77,6 +77,9 @@ class ResultRecord:
     base_commit: Optional[str] = None
     start_time: Optional[str] = None     # ISO 8601
     end_time: Optional[str] = None
+    cpu_user_time: Optional[float] = None   # seconds
+    cpu_system_time: Optional[float] = None # seconds
+    io_time: Optional[float] = None         # seconds
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
 
@@ -112,6 +115,9 @@ JSON field names (camelCase to match spec examples):
   "baseCommit": "abc123",
   "startTime": "2026-01-01T10:00:00Z",
   "endTime": "2026-01-01T10:05:00Z",
+  "cpuUserTime": 12.4,
+  "cpuSystemTime": 1.1,
+  "ioTime": 0.3,
   "inputTokens": 5000,
   "outputTokens": 1200
 }
@@ -165,11 +171,14 @@ Fields and defaults:
 **What it does:**
 - Preflight: verify git repo, required dirs, clean working tree (with confirmation),
   acquire lock file (detect stale by PID check)
-- Workspace: copy task/, global/, verifications/ into src/.agent-context/;
+- Workspace: copy current task dir contents → `src/.agent-context/task/`,
+  `global/` contents → `src/.agent-context/global/` (omit if absent),
+  `verifications/` contents → `src/.agent-context/verifications/`;
   detect and confirm overwrite of existing context dir
 - Write `running` record before agent stub; write `completed` record after
 - Archive existing latest record before writing new one (atomic: write temp → rename)
 - Remove src/.agent-context/ before committing
+- Abort with error if no changes in src/ or results/ to stage (nothing to commit)
 - Create git commit staging only src/ and results/
 - task_run.py stub: preflight → workspace → write running record → (no agent yet, sleep 1s) →
   write completed record → cleanup → commit
@@ -240,8 +249,8 @@ partial workspace state preserved on failure.
 
 **What it does:**
 - `agent-build rollback` command
-- Guards: no uncommitted changes; latest record must not be `skipped`; base commit must
-  exist in git history
+- Guards: no uncommitted changes **and no untracked files**; latest record must not be
+  `skipped`; base commit must exist in git history
 - Restores src/ to the base commit (only src/, other dirs untouched)
 - Deletes latest results record
 - Restores previous archived record (via `previousResults` chain) as new latest
@@ -270,6 +279,44 @@ partial workspace state preserved on failure.
 - Write `skipped` records for any intermediate tasks that have no latest record
 - Leave intermediate tasks that already have a latest record untouched
 - Then proceed with normal Task Run for the target task
+
+---
+
+## Edge Cases & Risk Notes
+
+### CRITICAL
+
+**Task ordering must be explicitly lexicographic on task IDs.**
+The resume algorithm relies on "highest-ordered task that has a latest record" and "all tasks before last_task". If task IDs are not zero-padded (e.g. `task-9` vs `task-10`), lexicographic sort gives wrong order. The spec must require zero-padded numeric prefixes, and `project.py` must sort by the full ID string and reject non-conforming names at load time.
+
+**Shell injection via task file content in agent_command.**
+`{prompt}` is substituted into `agent_command` which is executed as a shell command. Task file content read from disk becomes part of that substitution. Pass the prompt via `stdin` or a temp file, or use `subprocess` with an argument list (never `shell=True`). Do not interpolate file content directly into the command string.
+
+**Stale lock file: OS PID reuse.**
+A PID recorded in the lock file may be reused by an unrelated process after the original agent-build crashes. Checking `psutil.pid_exists(pid)` is not sufficient — also check the process name/cmdline matches `agent-build`. If it cannot be verified, refuse to proceed and require manual lock removal rather than auto-removing it.
+
+### HIGH
+
+**Malformed or partial result record JSON.**
+A crash during an atomic write (after temp-file creation, before rename) leaves only the temp file; the latest record is intact. But a crash during the rename on some filesystems can corrupt the target. `ResultsStore.get_latest()` must catch `json.JSONDecodeError` and treat it as an ERROR-level resume condition (not silently return `None`), so the user knows manual intervention is needed.
+
+**Atomic archive failure leaves no latest record.**
+`write()` archives the existing latest record first, then writes the new one. If the process dies between those two steps, there is no latest record but an archived one exists. On next load, `get_latest()` returns `None` for that task while archived records exist — this is an inconsistent state. `ResultsStore` should detect this (archived records exist but no latest) and surface it as an ERROR resume condition.
+
+**Verification output: last non-empty line, not last line.**
+"Parse last line of output" must strip trailing newlines/whitespace and find the last non-empty line. If the verification agent produces no parseable JSON (empty output, all whitespace, or exits non-zero), treat as FAIL with a synthetic reasoning string — never propagate a parse exception as an unhandled crash.
+
+**Verifications must only run after exit-code-0 agent completion.**
+The plan says "after agent completes: run verifications" — clarify: verifications run only when the agent exits with code 0. A non-zero exit code skips verification and goes directly to the retry/fail path. Otherwise verification results are meaningless against a broken workspace.
+
+**max_retries exhausted must produce a `failed` record and clean exit.**
+When the shared retry counter reaches zero (across timeout retries and verification-failure retries), `task_run.py` must write a `failed` result record, remove `.agent-context/`, release the lock, and exit with a non-zero status code. It must not leave the run in a `running` state.
+
+**Rollback: validate `previousResults` chain before starting.**
+Before touching any files, `rollback.py` must verify that the file named in `previousResults` actually exists in the results directory. If the chain is broken (file missing or itself malformed), abort with an error — do not partially restore src/ and leave results in an inconsistent state.
+
+**results/ directory must be created by `write()` if absent.**
+Phase 1 states "results dir absent → all get_latest calls return None". Phase 2 adds `write()`. `write()` must `mkdir(parents=True, exist_ok=True)` before writing, otherwise the first write to a fresh project fails with `FileNotFoundError`.
 
 ---
 
