@@ -109,9 +109,11 @@ class ResumePointKind(str, Enum):
 
 **Workspace:** copy task dir → `src/.agent-context/task/`, `global/` → `src/.agent-context/global/` (skip if absent), `verifications/` → `src/.agent-context/verifications/`. Confirm before overwriting existing `.agent-context/`; if confirmed, delete then recopy.
 
-**CRITICAL — Gitignore guard:** Before copying, ensure `.agent-context` is in `src/.gitignore` (append/create if needed). Without this, failed runs leave untracked files that block subsequent preflight checks and rollback.
+**CRITICAL — Gitignore guard:** Before copying, ensure `.agent-context` appears as a non-negated line in `src/.gitignore` (append/create if needed). Check for an exact line match on `.agent-context` (strip trailing whitespace; ignore `#`-prefixed and `!`-prefixed lines). If absent or only present as a negation (`!.agent-context`), append `.agent-context`. Without this, failed runs leave untracked files that block subsequent preflight checks and rollback.
 
 **Records:** write `running` record (with `base_commit`) before agent; write `completed` after. Remove `src/.agent-context/` before committing (success path only). Commit stages only `src/` and `results/`; abort cleanly if no changes.
+
+**CRITICAL — Commit failure on task completion:** If `git commit` fails during the success path (e.g., pre-commit hook rejects), `src/` and the staged index are already mutated but not committed. Overwrite the `completed` record with a `failed` record (preserving `base_commit`). Surface clear error: "`src/` changes could not be committed — record reverted to `failed`. Inspect and resolve manually." Do not attempt to undo `src/` mutations. This prevents a phantom `completed` state where the next task's `base_commit` would reference the wrong commit.
 
 **CRITICAL — Retries:** Preflight and workspace prep run exactly once per task run. All retries (timeout or verification failure) skip both steps and reuse the prepared workspace.
 
@@ -170,6 +172,7 @@ Command: `agent-build rollback`
 **HIGH — Lock acquisition:** Acquire the project lock (same `O_EXCL` mechanism) before any guards or file mutations. Without this, concurrent `rollback` and `run` can corrupt both `src/` and `results/` simultaneously. Same stale-lock rules apply; release in `finally`.
 
 **Guards (checked in order before touching files):**
+0. **HIGH:** At least one latest result record exists → abort with clear error ("No task records found; nothing to roll back.") if none present. Without this guard, subsequent guards that dereference the latest record throw unhandled exceptions.
 1. No uncommitted/untracked changes
 2. Latest record not `skipped`
 3. Base commit in git history
@@ -198,13 +201,13 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 | `project.py` | Lexicographic sort; missing `TASK.md` → error; empty vs. absent `tasks/` distinct; no leading alphanumeric → WARNING only; `001b-setup-extra`, `01.1-init` accepted |
 | `resume.py` | Discrepancy check first (unknown ID in latest AND archived → ERROR); consistency (archived without latest → ERROR); no records → READY; all completed/skipped → COMPLETE; gap → ERROR; running at last → NEEDS_CONFIRMATION; running not at last → ERROR; failed → READY |
 | `preflight.py` | `O_EXCL` atomicity; stale PID with mismatched cmdline → refuse; absent PID → acquire; corrupted/empty lock → refuse naming path; `.tmp` deleted before dirty-tree check; empty repo → abort; detached HEAD → abort |
-| `workspace.py` | `.agent-context` added to gitignore; no duplicate append; global absent → skip; existing `.agent-context/` triggers confirm |
+| `workspace.py` | `.agent-context` added to gitignore; no duplicate append; `!.agent-context` negation present → still appends non-negated line; global absent → skip; existing `.agent-context/` triggers confirm |
 | `agent.py` | Prompt via stdin not argv; `cwd=src/`; SIGINT kills then `wait()` reaps; SIGTERM handler installed → kills + `wait()` + raises `SystemExit`; timeout → kill + `wait()` + event; resume preserves `base_commit`; `OSError` → failed, no retry |
 | `verification.py` | Last non-empty line parsed; non-zero/empty/non-JSON/timeout → FAIL synthetic; `cwd=src/`; no files → skip; lexicographic halt on first FAIL; `{id}` is filename stem; `OSError` → FAIL synthetic; SIGINT → kill + re-raise |
-| `task_run.py` | `max_retries` exhausted → failed; lock released on exception; global prompt conditional; retry prompt has latest failure only; non-zero → verification skipped; `.agent-context/` removed on success only; commit aborts if no changes; explicit targeting: failed intermediate untouched; completed target archives old record; shared counter exhausted by mixed timeout+verification failures; workspace prep and preflight not repeated on any retry |
+| `task_run.py` | `max_retries` exhausted → failed; lock released on exception; global prompt conditional; retry prompt has latest failure only; non-zero → verification skipped; `.agent-context/` removed on success only; commit aborts if no changes; commit failure on success path → record reverted to `failed`, clear error; explicit targeting: failed intermediate untouched; completed target archives old record; shared counter exhausted by mixed timeout+verification failures; workspace prep and preflight not repeated on any retry |
 | `config.py` | Missing file → all defaults; zero/negative timeout → error; extra fields ignored; `{0}` in command → error; `{unknown}` in command → error; `{model}` only → valid; argv split for `shell=False` |
 | `results.py` | Malformed JSON → `ResultsStoreError`; non-existent → `None`; archive numbering with gaps; atomic write; consistency detects broken chain; `write()` creates dir; skipped serializes only `status` + `previousResults`; camelCase keys |
-| `rollback.py` | Missing `previousResults` file → abort before changes; null chain → delete only; skipped → abort; missing base commit → abort; guard order enforced; archive moved not copied; no-change → clear error, no empty commit; lock already held → abort before mutation |
+| `rollback.py` | No records → abort before any mutation (guard #0); missing `previousResults` file → abort before changes; null chain → delete only; skipped → abort; missing base commit → abort; guard order enforced; archive moved not copied; no-change → clear error, no empty commit; lock already held → abort before mutation |
 
 ### Integration Tests
 
@@ -213,7 +216,8 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 - **Discrepancy/consistency checks:** stale record → abort; archived with no latest → abort
 - **Verification retry:** FAIL → retry with latest reasoning only; exhausted → failed; non-zero → fail without verification
 - **Agent timeout:** subprocess killed → retry with original prompt; always-timing-out → failed
-- **Rollback:** `src/` reverted, new commit, record chain restored; blocked by dirty tree; blocked by skipped; commit failure after mutations → clear error
+- **Rollback:** `src/` reverted, new commit, record chain restored; blocked by dirty tree; blocked by skipped; commit failure after mutations → clear error; no records → abort with clear error before any mutation
+- **Commit failure on task completion:** pre-commit hook rejects commit → record reverted from `completed` to `failed`; `src/` changes preserved; subsequent run resumes at that task
 - **Agent binary not found:** `OSError` → failed record, lock released
 - **SIGINT/SIGTERM during agent:** running record remains; `process.wait()` reaps zombie; confirm → re-runs; `base_commit` matches interrupted record
 - **SIGINT during verification:** subprocess killed, lock released, running record persists → NEEDS_CONFIRMATION
