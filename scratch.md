@@ -98,6 +98,8 @@ The record **MUST** include:
 - CPU user time, system time, and IO time
 - implementation-defined "cost & effort" metrics (e.g. input and output token count, monetary value of API usage)
 
+Result records are written and kept up to date throughout the task run via event subscriptions. Both the task runner and the agent runner dispatch events (e.g., run started, agent progress, run completed), and the record writer **SHOULD** subscribe to these rather than writing the record only at the end. This means a record with status `running` **MUST** be written before agent invocation begins. Fields that are only known after the run — such as end timestamp, final status, and accumulated metrics — **MUST** be updated as the corresponding events are received. This approach is consistent with the requirement that the task runner listen for asynchronous messages from the agent runner (see Agent Invocation), and it ensures that a crash or unexpected termination leaves a recoverable `running` record rather than no record at all.
+
 ## Task Run Process
 
 ### Resume Point Determination
@@ -135,9 +137,11 @@ Upon agent completion, verifications are executed in lexicographical order of th
 
 Task runs **MUST** support a configurable timeout for agent execution. If the agent exceeds this timeout, the system **MUST** retry it with the same prompt that was used for the timed-out invocation. The retry prompt is intentionally identical to the original: capable agents are expected to inspect the workspace, identify what has already been done, and continue from there without explicit instruction. If the agent terminates with an error, no retry is attempted and the task run **MUST** be recorded as failed. Verification failures trigger a retry as described above. All retries — whether caused by timeouts or verification failures — draw from a single shared configurable retry limit.
 
+On timeout or failure, the contents of `src/` **MUST** be left as-is. The workspace is not reset between automatic retries, nor after the retry limit is exhausted or an error terminates the run. This serves two purposes: it allows the user to inspect the partial state, and it allows the user to trigger an explicit additional run that picks up where the agent left off.
+
 ### Result Recording and Commit
 
-Before committing, the system **MUST** remove `src/.agent-context/`. Successful task runs **MUST** then append a results record and create a commit.
+Before committing, the system **MUST** remove `src/.agent-context/`. Successful task runs **MUST** then append a results record and create a commit. The commit **MUST** stage only files within `src/` and `results/`; changes to other directories (e.g. `tasks/`, `verifications/`, `global/`) **MUST NOT** be included.
 
 ### Rollback
 
