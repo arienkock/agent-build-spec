@@ -216,24 +216,27 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 ### Critical Unit Tests
 
 - `project.py`: lexicographic sort of `001-a`, `001b-extra`, `002-b`; alphanumeric IDs accepted; missing `TASK.md` → `ProjectError`; empty `tasks/` → `ProjectError`
-- `results.py`: malformed JSON → `ResultsStoreError`; `check_consistency()` detects broken chain; `write()` creates dir; archive order logic; atomic temp-rename
-- `resume.py`: consistency check → ERROR before discrepancy check; `ResultsStoreError` → ERROR; discrepancy → ERROR; all `skipped` → COMPLETE; gap in records → ERROR
-- `preflight.py`: `O_EXCL` atomicity at `.agent-build.lock`; stale lock PID scenarios; `src/` absent → error
-- `workspace.py`: `.agent-context` added to `src/.gitignore` if absent; gitignore file created if needed
-- `agent.py`: prompt via stdin not argv; `cwd=src/`; SIGINT kills subprocess
-- `verification.py`: last non-empty line; empty/non-zero/non-JSON/timeout → FAIL with synthetic reasoning; `cwd=src/`; timeout uses `verification_timeout_seconds`; no verification files → skip (all-pass)
-- `task_run.py`: `max_retries` exhausted → `failed` + non-zero exit; shared retry counter across timeout+verification failures; lock released on unhandled exception; `running` record includes `base_commit`; global prompt conditional; NEEDS_CONFIRMATION → new `running` record overwrites old, task re-runs from scratch; retry prompt format matches spec appendix (only most recent verification reasoning appended)
-- `rollback.py`: broken `previousResults` chain → abort before file changes; `previousResults: null` path
+- `results.py`: malformed JSON → `ResultsStoreError`; `check_consistency()` detects broken chain; `write()` creates dir; archive order logic (max+1 not count — gaps in numbering handled correctly); atomic temp-rename; `get_latest()` returns `None` for non-existent task (not raising)
+- `resume.py`: consistency check → ERROR before discrepancy check; `ResultsStoreError` → ERROR; discrepancy → ERROR; all `skipped` → COMPLETE; gap in records → ERROR; single `running` record for last task → NEEDS_CONFIRMATION; all tasks `completed` → COMPLETE; last task `completed` with remaining unrecorded tasks → READY (next task); last task `failed` → READY (re-run that task); `running` record NOT at last position (earlier task running) → ERROR
+- `preflight.py`: `O_EXCL` atomicity at `.agent-build.lock`; stale lock PID exists but cmdline doesn't match `agent-build` → refuse; stale lock PID does not exist → can acquire; `src/` absent → error
+- `workspace.py`: `.agent-context` added to `src/.gitignore` if absent; gitignore file created if needed; `.agent-context` already in gitignore → no duplicate appended; `global/` absent → skip global copy without error; existing `.agent-context/` triggers confirmation prompt before overwrite
+- `agent.py`: prompt via stdin not argv; `cwd=src/`; SIGINT kills subprocess; timeout → kills subprocess and returns timeout event
+- `verification.py`: last non-empty line parsed (trailing blank lines ignored); empty/non-zero/non-JSON/timeout → FAIL with synthetic reasoning; `cwd=src/`; timeout uses `verification_timeout_seconds` not `agent_timeout_seconds`; no verification files → skip (all-pass); verifications run in lexicographic order and halt on first FAIL
+- `task_run.py`: `max_retries` exhausted → `failed` record + non-zero exit; shared retry counter across timeout and verification failures; lock released on unhandled exception; `running` record includes `base_commit`; global prompt conditional on `GLOBAL.md` actually copied; NEEDS_CONFIRMATION → new `running` record overwrites old, task re-runs from scratch; retry prompt format matches spec appendix (only most recent verification reasoning appended, not accumulated); agent non-zero exit → verification phase skipped → `failed` record; `.agent-context/` removed before commit on success path only; commit aborts cleanly if no changes in `src/` or `results/`; agent timeout retry uses original unchanged prompt (no reasoning appended)
+- `rollback.py`: broken `previousResults` chain (file missing) → abort before any file changes; `previousResults: null` → delete latest record, no archive to promote; latest record is `skipped` → abort; base commit not in git history → abort; guard checks complete before any file is touched (order: uncommitted changes, skipped check, base commit, previousResults chain)
 
 ### Critical Integration Tests
 
-- Full happy path: resume → preflight → workspace → running record → agent → completed record → cleanup → commit
-- Resume after failure: task 2 `failed` → re-runs task 2
+- Full happy path: resume → preflight → workspace (gitignore guard) → running record → agent → verification all-pass → completed record → `.agent-context/` cleanup → commit
+- Resume after failure: task 2 `failed` → re-runs task 2; earlier tasks unchanged
 - Discrepancy check: stale record for deleted task → abort before any side effects
 - Consistency check: archived record with no latest → abort
-- Verification flow: FAIL → retry with reasoning appended; all PASS → completed; non-zero exit → skip verification
-- `max_retries=1` with always-failing verification → `failed` record after 1 retry
-- Rollback: src/ reverted, commit created, record chain restored; blocked by dirty working tree
-- Explicit targeting: `agent-build run <id>` with stale record → discrepancy check aborts before confirmation prompt
-- SIGINT: subprocess killed, `running` record remains, lock released, next run shows NEEDS_CONFIRMATION
+- Verification flow: FAIL → retry with reasoning appended (only latest); all PASS → completed; non-zero exit → verification skipped → `failed`
+- Agent timeout: subprocess killed → retry with original prompt (unchanged, no reasoning); shared retry counter decremented; `max_retries=1` with always-timing-out agent → `failed` record after 1 retry
+- `max_retries=1` with always-failing verification → `failed` record after 1 retry; lock released; `src/` left as-is
+- Rollback: `src/` reverted to base commit, new commit created, record chain correctly restored; blocked by dirty working tree; blocked by `skipped` record
+- Explicit targeting happy path: intermediate unrecorded tasks receive `skipped` records; target task runs normally; discrepancy check runs and aborts before confirmation prompt if stale record found
+- SIGINT: subprocess killed, `running` record remains, lock released, subsequent run shows NEEDS_CONFIRMATION; after confirmation new `running` record overwrites old and task re-runs from scratch
 - Lexicographic ordering: `001-a`, `001b-extra`, `002-b` all accepted and sorted correctly
+- Workspace overwrite: existing `.agent-context/` from prior run triggers confirmation; confirmed → deleted and recopied; denied → abort
+- Live metric updates: kill agent mid-run → `running` record in results file contains partial token/timing metrics captured before kill
