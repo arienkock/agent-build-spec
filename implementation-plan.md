@@ -191,7 +191,6 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 | Module | Key cases |
 |---|---|
 | `project.py` | Lexicographic sort; missing `TASK.md` → error; empty `tasks/` → distinct error from absent |
-| `results.py` | Malformed JSON → `ResultsStoreError`; non-existent → `None`; archive numbering with gaps; atomic write; `check_consistency()` detects broken chain |
 | `resume.py` | Consistency → ERROR before discrepancy; all skipped → COMPLETE; gap → ERROR; running at last → NEEDS_CONFIRMATION; running not at last → ERROR; failed → READY; completed with remaining → READY (next) |
 | `preflight.py` | `O_EXCL` atomicity; stale PID with mismatched cmdline → refuse; absent PID → acquire; `src/` absent → error; corrupted/non-parseable lock file → refuse with error message naming lock file path; tmp `.tmp` files deleted before dirty-tree check (not after) |
 | `workspace.py` | `.agent-context` added to gitignore; no duplicate append; global absent → skip; existing `.agent-context/` triggers confirm |

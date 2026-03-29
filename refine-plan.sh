@@ -34,7 +34,7 @@ for i in {1..7}; do
   while [ "$WORD_COUNT" -gt 2100 ]; do
     echo "The implementation plan is too long ($WORD_COUNT words)."
     claudeNoCount "Rewrite it to be concise and clear, while retaining all critical information. Limit it to 2000 words or less."
-    WORD_COUNT=$(wc -w implementation-plan.md)
+    WORD_COUNT=$(wc -w < implementation-plan.md)
   done
   
   if [ "$LGTM_COUNT" -ge 4 ]; then
