@@ -108,7 +108,7 @@ Prompt always passed via stdin, never interpolated into `agent_command`. Command
 
 **Task ordering:** lexicographic on full directory name. Accept formats like `001b-setup-extra`, `01.1-init`. Emit WARNING (not error) for names with no leading alphanumeric prefix. Abort if any task dir lacks `TASK.md`; use distinct errors for empty `tasks/` vs. `tasks/` absent.
 
-**Explicit task targeting** (`agent-build run <task-id>`): run discrepancy and consistency checks first (abort before confirmation prompt if either fails); confirm with user; write `skipped` records for intermediate tasks with no latest record; run target task normally.
+**Explicit task targeting** (`agent-build run <task-id>`): run consistency check and discrepancy check first (abort before confirmation prompt if either fails). The discrepancy check for explicit targeting additionally aborts if any intermediate task (ordered before `<task-id>`) has a `failed` latest record — the user must resolve or re-run those tasks first. After confirmation, write `skipped` records for intermediate tasks with no latest record (do not overwrite existing records); run target task normally.
 
 ---
 
@@ -170,7 +170,7 @@ Guards checked in order before touching any files:
 3. Base commit in git history
 4. If `previousResults` non-null: verify referenced archive exists and is valid JSON
 
-Actions: restore `src/` to base commit; delete latest record; if `previousResults` non-null, promote archive as new latest; create new commit (no history rewrite). `previousResults: null` → delete latest record only.
+Actions: restore `src/` to base commit; delete latest record; if `previousResults` non-null, rename (move) archive to be the new latest record (not copy — archive file is consumed); create new commit (no history rewrite) staging `src/` and `results/`. `previousResults: null` → delete latest record only; `src/` revert still committed.
 
 ---
 
@@ -195,7 +195,7 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 | `workspace.py` | `.agent-context` added to gitignore; no duplicate append; global absent → skip; existing `.agent-context/` triggers confirm |
 | `agent.py` | Prompt via stdin not argv; `cwd=src/`; SIGINT kills subprocess; timeout → kill + timeout event |
 | `verification.py` | Last non-empty line parsed; empty/non-JSON/timeout → FAIL; `cwd=src/`; timeout uses `verification_timeout_seconds`; no files → skip; lexicographic order; halt on first FAIL |
-| `task_run.py` | `max_retries` exhausted → failed + non-zero exit; lock released on exception; global prompt conditional on GLOBAL.md actually copied; retry prompt format (latest failure only); agent non-zero → verification skipped; `.agent-context/` removed on success only; commit aborts cleanly if no changes; timeout retry uses original unchanged prompt |
+| `task_run.py` | `max_retries` exhausted → failed + non-zero exit; lock released on exception; global prompt conditional on GLOBAL.md actually copied; retry prompt format (latest failure only); agent non-zero → verification skipped; `.agent-context/` removed on success only; commit aborts cleanly if no changes; timeout retry uses original unchanged prompt; explicit targeting with failed intermediate → abort before confirmation |
 | `rollback.py` | Missing `previousResults` file → abort before changes; null chain → delete only; skipped → abort; missing base commit → abort; guard order enforced |
 
 ### Integration Tests
@@ -208,7 +208,7 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 - **Agent timeout:** subprocess killed → retry with original prompt; `max_retries=1` always-timing-out → `failed`
 - **Verification exhaustion:** `max_retries=1` always-failing verification → `failed`; lock released; `src/` left as-is
 - **Rollback:** `src/` reverted, new commit, record chain restored; blocked by dirty tree; blocked by skipped record
-- **Explicit targeting:** intermediate tasks get skipped records; discrepancy check aborts before confirmation
+- **Explicit targeting:** intermediate tasks get skipped records; discrepancy check aborts before confirmation; intermediate task with `failed` record aborts before confirmation
 - **SIGINT:** subprocess killed, running record remains, lock released; next run → NEEDS_CONFIRMATION; confirm → re-runs from scratch
 - **Lexicographic ordering:** `001-a`, `001b-extra`, `002-b` sorted correctly
 - **Workspace overwrite:** confirm → delete + recopy; deny → abort
