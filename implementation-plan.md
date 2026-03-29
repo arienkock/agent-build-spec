@@ -92,7 +92,7 @@ class ResumePointKind(str, Enum):
 }
 ```
 
-Prompt always passed via stdin, never interpolated into `agent_command`. Command split to argv list, `shell=False`. Missing fields use per-field defaults; unknown fields ignored; zero/negative timeout → validation error.
+Prompt always passed via stdin, never interpolated into `agent_command`. Command split to argv list, `shell=False`. Missing fields use per-field defaults; unknown fields ignored; zero/negative timeout → validation error. **`{model}` substitution must use keyword-only `.format(model=model)` (HIGH):** positional or extra braces in user-supplied `agent_command` (e.g. `{0}`, `{foo}`) would cause a confusing `KeyError`/`IndexError` at launch time rather than a config validation error. Use `.format(model=model)` or `str.replace('{model}', model)` to restrict substitution to the known key only.
 
 ---
 
@@ -101,7 +101,9 @@ Prompt always passed via stdin, never interpolated into `agent_command`. Command
 **Preflight order:**
 1. **Startup cleanup (CRITICAL):** Delete any `results/*.tmp` files before the dirty-tree check. These are left by crashed atomic writes and would permanently block the dirty-tree check.
 2. Verify git repo, required dirs (`src/`, `tasks/`, `verifications/`), clean working tree (prompt if dirty).
-3. Acquire lock at `<project_root>/.agent-build.lock` via `O_CREAT | O_EXCL | O_WRONLY`. Stale lock: check PID exists AND cmdline matches `agent-build`; refuse if unverifiable. Non-parseable, corrupted, or empty lock file content → refuse with a clear error naming the lock file path.
+3. **Empty repo check (CRITICAL):** Verify `git rev-parse HEAD` succeeds (at least one commit exists). Without an initial commit, `base_commit` cannot be captured, making rollback impossible and producing a confusing mid-run failure. Abort with a clear error if the repo has no commits.
+4. **Detached HEAD check (HIGH):** Verify `git symbolic-ref HEAD` succeeds (repo is on a named branch). Committing on a detached HEAD creates an unreachable commit, silently losing agent work. Abort with a clear error if HEAD is detached.
+5. Acquire lock at `<project_root>/.agent-build.lock` via `O_CREAT | O_EXCL | O_WRONLY`. Stale lock: check PID exists AND cmdline matches `agent-build`; refuse if unverifiable. Non-parseable, corrupted, or empty lock file content → refuse with a clear error naming the lock file path.
 
 **Workspace:** copy task dir → `src/.agent-context/task/`, `global/` → `src/.agent-context/global/` (skip if absent), `verifications/` → `src/.agent-context/verifications/`. Confirm before overwriting existing `.agent-context/`; if confirmed, delete then recopy.
 
@@ -141,7 +143,7 @@ Complete the task. When you are done, stop. Verifications will be run automatica
 - Timeout → retry with identical original prompt (shared `max_retries` counter)
 - Non-zero exit → no retry → `failed` record
 - `OSError` on launch (binary not found, etc.): catch around `Popen`; write `failed` record, do not retry, do not propagate past `agent.py`
-- SIGINT/SIGTERM: kill subprocess, re-raise; `running` record remains. On next run: NEEDS_CONFIRMATION → **read `base_commit` from existing running record first**, then overwrite with new `running` record using that preserved value, re-run from scratch
+- SIGINT/SIGTERM: kill subprocess, then **call `process.wait()` to reap the zombie before re-raising** (HIGH: without `wait()`, the killed process lingers as a zombie, keeping its PID entry alive and causing stale-lock PID checks to incorrectly see the process as still running); `running` record remains. On next run: NEEDS_CONFIRMATION → **read `base_commit` from existing running record first**, then overwrite with new `running` record using that preserved value, re-run from scratch
 - Lock released in `finally` block (including `KeyboardInterrupt`)
 - Live metric updates: subscribe to agent events, update `running` record with partial token/timing metrics as they arrive
 
@@ -195,12 +197,12 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 |---|---|
 | `project.py` | Lexicographic sort; missing `TASK.md` → error; empty `tasks/` distinct from absent |
 | `resume.py` | Discrepancy check first (unknown task ID in latest AND archived filenames → ERROR); consistency check (archived without latest → ERROR); all skipped → COMPLETE; gap → ERROR; running at last → NEEDS_CONFIRMATION; running not at last → ERROR; failed → READY; completed with remaining → READY (next) |
-| `preflight.py` | `O_EXCL` atomicity; stale PID with mismatched cmdline → refuse; absent PID → acquire; corrupted/empty lock file → refuse naming path; `.tmp` files deleted before dirty-tree check |
+| `preflight.py` | `O_EXCL` atomicity; stale PID with mismatched cmdline → refuse; absent PID → acquire; corrupted/empty lock file → refuse naming path; `.tmp` files deleted before dirty-tree check; empty repo (no HEAD commit) → abort; detached HEAD → abort |
 | `workspace.py` | `.agent-context` added to gitignore; no duplicate append; global absent → skip; existing `.agent-context/` triggers confirm |
-| `agent.py` | Prompt via stdin not argv; `cwd=src/`; SIGINT kills subprocess; timeout → kill + event; on resume after SIGINT, `base_commit` read before overwrite; `OSError` → `failed` record, no retry |
+| `agent.py` | Prompt via stdin not argv; `cwd=src/`; SIGINT kills subprocess then `wait()` reaps zombie; timeout → kill + `wait()` + event; on resume after SIGINT, `base_commit` read before overwrite; `OSError` → `failed` record, no retry |
 | `verification.py` | Last non-empty line parsed; empty/non-JSON/timeout → FAIL; `cwd=src/`; timeout uses `verification_timeout_seconds`; no files → skip; lexicographic order; halt on first FAIL; retry `{id}` is filename stem; `OSError` → FAIL synthetic; SIGINT → kill + re-raise |
 | `task_run.py` | `max_retries` exhausted → failed; lock released on exception; global prompt conditional on GLOBAL.md copied; retry prompt format (latest failure only); non-zero → verification skipped; `.agent-context/` removed on success only; commit aborts if no changes; timeout retry uses original prompt; explicit targeting with failed intermediate → intermediate left untouched, target task runs normally; non-existent task ID → abort before side effects; `base_commit` preserved from prior running record; shared counter: one timeout + one verification failure together exhaust `max_retries=2` |
-| `config.py` | Missing file → all defaults; negative timeout → validation error; extra fields ignored |
+| `config.py` | Missing file → all defaults; negative timeout → validation error; extra fields ignored; `agent_command` with extra braces (e.g. `{0}`) → validation error or safe substitution, not runtime crash |
 | `results.py` | Malformed JSON → `ResultsStoreError`; non-existent → `None`; archive numbering with gaps; atomic write; `check_consistency()` detects broken chain; `write()` creates dir if absent |
 | `rollback.py` | Missing `previousResults` file → abort before changes; null chain → delete only; skipped → abort; missing base commit → abort; guard order enforced; archive moved not copied; no-op rollback → clear error, no empty commit |
 
@@ -217,5 +219,8 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 - **SIGINT during agent:** running record remains; confirm → re-runs; `base_commit` in new record matches interrupted record
 - **Explicit targeting:** intermediate tasks with no record get skipped records; intermediate tasks with existing records (including `failed`) are left untouched; target task runs normally; discrepancy/consistency errors abort before confirmation prompt
 - **Startup tmp cleanup:** `.tmp` file in `results/` → deleted at startup → dirty-tree check passes
+- **Empty git repo:** repo has no commits → `agent-build run` aborts with clear error before writing any records
+- **Detached HEAD:** repo is in detached HEAD state → `agent-build run` aborts with clear error before writing any records
+- **Zombie reaping:** agent killed mid-run (SIGINT) → `process.wait()` called → process not listed in zombie state
 - **Workspace overwrite:** confirm → delete + recopy; deny → abort
 - **Live metrics:** kill mid-run → partial metrics in running record
