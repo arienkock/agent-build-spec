@@ -91,10 +91,12 @@ A Results Record is a JSON file that documents the outcome of a task run. The la
 
 The latest record **MUST** include a `previousResults` field containing the filename of the immediately preceding archived record, or `null` if no prior run exists. This creates an explicit history chain between records independent of the ordering counter.
 
-The record **MUST** include:
+Records with status `skipped` are a special case: they **MUST** contain only the `status` field (set to `skipped`) and the `previousResults` field. All other fields defined below are **NOT** applicable and **MUST NOT** be included.
+
+For all other statuses, the record **MUST** include:
 - the base commit ID (the HEAD commit at the start of the task run; preflight ensures this is a clean state unless the user has overridden that check)
 - start and end timestamps
-- task run status (running, skipped, completed, failed)
+- task run status (running, completed, failed)
 - CPU user time, system time, and IO time
 - implementation-defined "cost & effort" metrics (e.g. input and output token count, monetary value of API usage)
 
