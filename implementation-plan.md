@@ -1,156 +1,91 @@
 # Implementation Plan: Agent Build Spec
 
-## Language & Stack
+## Stack
 
-- **Python 3.11+** with full type hints throughout
-- **click** for CLI
-- CLI command: `agent-build`
-- Python package: `agent_build`
+- **Python 3.11+**, full type hints, `click` CLI, command: `agent-build`, package: `agent_build`
 
 ## Module Layout
 
 ```
 agent_build/
-  __init__.py
-  types.py         — shared dataclasses/enums (Task, ResultRecord, ResumePoint, etc.)
+  types.py         — Task, ResultRecord, ResumePoint dataclasses/enums
   config.py        — Config dataclass, loaded from agent-build.config.json
-  project.py       — Project: load & validate filesystem structure
+  project.py       — load & validate filesystem structure
   results.py       — ResultsStore: read/write/archive result records
-  resume.py        — determine_resume_point(): pure logic over tasks + records
-  events.py        — typed EventEmitter + event catalog          [Phase 3]
+  resume.py        — determine_resume_point(): pure logic
   preflight.py     — git clean check, lock file, dir existence   [Phase 2]
   workspace.py     — copy context into src/.agent-context/       [Phase 2]
+  events.py        — typed EventEmitter + event catalog          [Phase 3]
   agent.py         — invoke Claude subprocess, emit events       [Phase 3]
   verification.py  — invoke verification agent, parse JSON       [Phase 4]
   task_run.py      — orchestrate full cycle                      [Phase 2+]
   rollback.py      — restore src/ to base commit                 [Phase 5]
   cli.py           — entry point: commands, output rendering
-pyproject.toml
 ```
 
-Each phase adds modules and extends `task_run.py` and `cli.py` — it does **not** rewrite
-earlier modules. `types.py`, `project.py`, `results.py`, and `resume.py` are written once
-in Phase 1 and remain stable.
+`types.py`, `project.py`, `results.py`, `resume.py` are written once in Phase 1 and remain stable. Each phase extends `task_run.py` and `cli.py` without rewriting earlier modules.
 
 ---
 
-## Phase 1 — Core structure + Resume Point (CLI-validatable)
+## Phase 1 — Core Structure + Resume Point
 
-**New modules:** `types.py`, `config.py`, `project.py`, `results.py`, `resume.py`, `cli.py`
+**New:** `types.py`, `config.py`, `project.py`, `results.py`, `resume.py`, `cli.py`
 
-**What it does:**
-- Loads and validates the project structure from disk (tasks/, verifications/, global/)
-- Reads existing result records from results/
-- Determines the unambiguous resume point (or errors/confirms as required)
-- Performs the discrepancy check (records referencing non-existent task IDs)
+Loads/validates project from disk, reads result records, determines resume point.
 
-**CLI commands:**
-- `agent-build status` — table of all tasks with their latest result status and run count
-- `agent-build run` — prints the resume point; task execution stubbed as "not yet implemented"
+**CLI:** `agent-build status` (task table), `agent-build run` (prints resume point, execution stubbed).
 
-**Validates:** project parsing, resume point logic, ambiguity detection, discrepancy check.
+### Key Types
 
-### types.py
-
-Key types:
 ```python
 class TaskRunStatus(str, Enum):
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    SKIPPED = "skipped"
+    RUNNING = "running"; COMPLETED = "completed"; FAILED = "failed"; SKIPPED = "skipped"
 
 @dataclass(frozen=True)
 class Task:
-    id: str
-    path: Path
-
-@dataclass(frozen=True)
-class VerificationFile:
-    id: str
-    path: Path
+    id: str; path: Path
 
 @dataclass
 class ResultRecord:
     status: TaskRunStatus
-    previous_results: Optional[str]      # filename of prior archived record, or None
+    previous_results: Optional[str]   # archived filename or None
     base_commit: Optional[str] = None
-    start_time: Optional[str] = None     # ISO 8601
+    start_time: Optional[str] = None  # ISO 8601
     end_time: Optional[str] = None
-    cpu_user_time: Optional[float] = None   # seconds
-    cpu_system_time: Optional[float] = None # seconds
-    io_time: Optional[float] = None         # seconds
+    cpu_user_time: Optional[float] = None
+    cpu_system_time: Optional[float] = None
+    io_time: Optional[float] = None
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
 
 class ResumePointKind(str, Enum):
-    READY               = "ready"
-    COMPLETE            = "complete"
-    NEEDS_CONFIRMATION  = "needs_confirmation"   # running task found
-    ERROR               = "error"                # ambiguous state
-
-@dataclass
-class ResumePoint:
-    kind: ResumePointKind
-    task: Optional[Task] = None
-    message: str = ""
+    READY = "ready"; COMPLETE = "complete"
+    NEEDS_CONFIRMATION = "needs_confirmation"  # running task found
+    ERROR = "error"                            # ambiguous state
 ```
 
-### results.py — ResultsStore
+### results.py
 
-- `get_latest(task_id) -> Optional[ResultRecord]` — raises `ResultsStoreError` on malformed JSON
-- `list_task_ids_in_store() -> set[str]` — all task IDs referenced by any record file
-  (used for discrepancy check; parses both latest and archived filenames)
-- `check_consistency() -> list[str]` — returns task IDs that have archived records but no latest record (atomic archive failure detection)
-- Results dir absent → all `get_latest` calls return `None`; `check_consistency()` returns `[]`
+- Filenames: latest `results-<id>.json`, archived `results-<id>--run-<N>.json`
+- JSON uses camelCase (`previousResults`, `baseCommit`, `startTime`, etc.)
+- Skipped records contain only `status` and `previousResults`
+- `get_latest(task_id)` raises `ResultsStoreError` on malformed JSON (never returns `None` for corrupt files)
+- `check_consistency()` returns task IDs with archived records but no latest record
+- `write()` creates results dir if absent; archives existing latest atomically (temp → rename) before writing new one
+- Archive order: use `max_existing_archived_order + 1` (NOT count of existing archives); this ensures correct numbering even when archived records have been manually removed
 
-Record filenames:
-- Latest:   `results-<Task ID>.json`
-- Archived: `results-<Task ID>--run-<Order>.json`
+### resume.py Algorithm
 
-JSON field names (camelCase to match spec examples):
-```json
-{
-  "status": "completed",
-  "previousResults": "results-001-setup--run-1.json",
-  "baseCommit": "abc123",
-  "startTime": "2026-01-01T10:00:00Z",
-  "endTime": "2026-01-01T10:05:00Z",
-  "cpuUserTime": 12.4,
-  "cpuSystemTime": 1.1,
-  "ioTime": 0.3,
-  "inputTokens": 5000,
-  "outputTokens": 1200
-}
-```
+0. **Consistency check** — `check_consistency()` non-empty → ERROR
+1. **Discrepancy check** — record references unknown task ID → ERROR; `ResultsStoreError` from `get_latest()` → ERROR
+2. Multiple `running` tasks → ERROR
+3. No records → READY (first task)
+4. Find `last_task`: highest-ordered task with a latest record
+5. All tasks before `last_task` must be `completed` or `skipped`; any gap or failure → ERROR
+6. Evaluate `last_task`: `running` → NEEDS_CONFIRMATION; `failed` → READY (re-run); `completed`/`skipped` → READY (next unrecorded task) or COMPLETE (none remain)
 
-Skipped records contain only `status` and `previousResults`.
+### config.py Defaults
 
-### resume.py — determine_resume_point()
-
-Algorithm (in order):
-0. **Consistency check** — any task ID has archived records but no latest record (atomic archive failure) → ERROR
-1. **Discrepancy check** — any record file references a task ID not in `project.tasks` → ERROR; catch `ResultsStoreError` from any `get_latest()` call and convert to ERROR
-2. **Multiple running tasks** → ERROR
-3. **No records at all** → READY (first task)
-4. Find `last_task`: highest-ordered task that has a latest record
-5. **Check all tasks before `last_task`** are successful (COMPLETED or SKIPPED):
-   - Any gap (no record) → ERROR
-   - Any non-success record → ERROR
-6. **Evaluate `last_task`'s status:**
-   - `running` → NEEDS_CONFIRMATION
-   - `failed` → READY (re-run `last_task`)
-   - `completed` / `skipped`:
-     - Further tasks exist without records → READY (first unrecorded task)
-     - No further tasks → COMPLETE
-
-Note: `skipped` is treated as equivalent to `completed` throughout.
-
-### config.py — Config
-
-Loaded from `agent-build.config.json` at project root; falls back to defaults if absent.
-
-Fields and defaults:
 ```json
 {
   "agent_command": "claude --print --dangerously-skip-permissions --model {model}",
@@ -161,378 +96,129 @@ Fields and defaults:
 }
 ```
 
-`{model}` is substituted at invocation time. The prompt is **always passed via stdin** — it is never interpolated into the command string. The command is split into an argument list and executed with `subprocess` and `shell=False`; the prompt is written to the process's stdin after launch. This prevents shell injection via task file content.
+Prompt is **always passed via stdin**, never interpolated into `agent_command`. Command split into argv list, `shell=False`.
 
 ---
 
-## Phase 2 — Preflight + Workspace + Results writing + Commits
+## Phase 2 — Preflight + Workspace + Commits
 
-**New modules:** `preflight.py`, `workspace.py`
-**Extended:** `results.py` (write/archive), `task_run.py` (skeleton run), `cli.py`
+**New:** `preflight.py`, `workspace.py`; extends `results.py`, `task_run.py`, `cli.py`
 
-**What it does:**
-- Preflight: verify git repo, required dirs, clean working tree (with confirmation),
-  acquire lock file (detect stale by PID check)
-- Workspace: copy current task dir contents → `src/.agent-context/task/`,
-  `global/` contents → `src/.agent-context/global/` (omit if absent),
-  `verifications/` contents → `src/.agent-context/verifications/`;
-  detect and confirm overwrite of existing context dir
-- Write `running` record before agent stub; write `completed` record after
-- Archive existing latest record before writing new one (atomic: write temp → rename)
-- Remove src/.agent-context/ before committing (success path only; on failure/timeout it is left as-is per spec)
-- Abort with error if there are no changes in **both** src/ **and** results/ (i.e. nothing to commit)
-- Create git commit staging only src/ and results/
-- task_run.py stub: preflight → workspace → write running record → (no agent yet, sleep 1s) →
-  write completed record → cleanup → commit
-
-**New ResultsStore methods:**
-- `write(task_id, record)` — atomic write (temp file → rename), archives existing latest first
-- `next_archive_order(task_id) -> int` — max existing archived order + 1
-
-**Validates:** git integration, lock file lifecycle, context copy, atomic record writes,
-archiving chain, commit staging scope.
+- Preflight: verify git repo, required dirs (`src/`, `tasks/`, `verifications/`), clean working tree (prompt if dirty), acquire lock file atomically (`O_EXCL`); stale lock: check PID + cmdline, refuse if unverifiable
+- Workspace: copy task dir → `src/.agent-context/task/`, `global/` → `src/.agent-context/global/` (skip if absent), `verifications/` → `src/.agent-context/verifications/`; confirm before overwriting existing context
+- Write `running` record (with `base_commit`) before agent; write `completed` after
+- Remove `src/.agent-context/` before committing (success path only; leave as-is on failure)
+- Commit stages only `src/` and `results/`; abort if no changes in either
 
 ---
 
-## Phase 3 — Real Agent Invocation
+## Phase 3 — Agent Invocation
 
-**New modules:** `events.py`, `agent.py`
-**Extended:** `task_run.py`, `cli.py` (live progress)
+**New:** `events.py`, `agent.py`; extends `task_run.py`, `cli.py`
 
-**What it does:**
-- Invoke `agent_command` as a non-interactive subprocess (no TTY, captured STDIO)
-- Emit typed events: `AgentStarted`, `AgentOutput`, `AgentCompleted`, `AgentTimedOut`
-- task_run.py subscribes: result recorder updates record on each event
-- On timeout: retry with identical prompt (agent inspects workspace and continues)
-- On non-zero exit code: no retry, record as failed
-- Live progress: periodically report net lines added/removed in src/ vs base commit
-
-**events.py:**
-```python
-@dataclass
-class AgentStarted: pass
-@dataclass
-class AgentOutput:
-    chunk: str
-@dataclass
-class AgentCompleted:
-    exit_code: int
-@dataclass
-class AgentTimedOut: pass
-```
-
-**Validates:** subprocess management, timeout/retry behavior, prompt construction,
-partial workspace state preserved on failure.
+- Invoke `agent_command` as subprocess: no TTY, captured stdio, `cwd=<root>/src/`, prompt via stdin
+- Events: `AgentStarted`, `AgentOutput(chunk)`, `AgentCompleted(exit_code)`, `AgentTimedOut`
+- On timeout: retry with identical prompt (shared `max_retries` counter)
+- On non-zero exit: no retry, record as failed
+- SIGINT/SIGTERM: kill subprocess, re-raise; `running` record remains (next run shows NEEDS_CONFIRMATION)
+- Lock released in `finally` block wrapping entire run
 
 ---
 
 ## Phase 4 — Verifications + Retry Loop
 
-**New modules:** `verification.py`
-**Extended:** `task_run.py`
+**New:** `verification.py`; extends `task_run.py`
 
-**What it does:**
-- After agent completes **with exit code 0**: run verifications in lexicographical order;
-  a non-zero exit code skips verification entirely and goes directly to the **fail path (no retry)**
-- Each verification: invoke agent with verification file content + task reference +
-  structured response instruction appended
-- Parse the **last non-empty line** of output as `{"status": "PASS"|"FAIL", "reasoning": "..."}`
-- First FAIL halts further verifications; append reasoning to original prompt; retry agent
-- On retry: only the most recent failure reasoning is appended (not accumulated)
-- All retries (timeout + verification failure) draw from shared `max_retries` counter
-
-**Validates:** full happy-path end-to-end, retry prompt construction, retry limit enforcement.
+- Verifications run only after agent exits with code 0; non-zero exit skips verification → fail path
+- Run verifications in lexicographic order; each invoked with `cwd=<root>/src/`
+- **Verification prompt structure** (per spec appendix): reproduce verification file content verbatim, then append a reference to the task instructions ("`The task instructions are in .agent-context/task/TASK.md. Read them before making your assessment.`"), then append the structured response instruction ("`Respond with a single JSON object on the last line of your output. Do not include any text after the JSON object. { "status": "PASS" | "FAIL", "reasoning": "<brief explanation>" }`")
+- Parse **last non-empty line** of output as `{"status": "PASS"|"FAIL", "reasoning": "..."}`
+- Empty/whitespace output or non-zero exit → FAIL with synthetic reasoning (no propagated exception)
+- First FAIL: append reasoning to original prompt, retry agent (only most recent reasoning, not accumulated)
+- Timeout + verification-failure retries share `max_retries`; exhausted → `failed` record, non-zero exit, `src/` left as-is
 
 ---
 
 ## Phase 5 — Rollback
 
-**New modules:** `rollback.py`
-**Extended:** `cli.py`
+**New:** `rollback.py`; extends `cli.py`
 
-**What it does:**
 - `agent-build rollback` command
-- Guards: no uncommitted changes **and no untracked files**; latest record must not be
-  `skipped`; base commit must exist in git history
-- Restores src/ to the base commit (only src/, other dirs untouched)
-- Deletes latest results record
-- Restores previous archived record (via `previousResults` chain) as new latest
-- Creates a new commit (history is append-only, no rewrites)
-
-**Validates:** rollback guards, src/ isolation, previousResults chain, commit creation.
+- Guards (validate before touching files): no uncommitted/untracked changes; latest record not `skipped`; base commit in git history; if `previousResults` is non-null, verify that the referenced archived file exists and is valid JSON (skip this check when `previousResults` is null — there is simply no prior record to restore)
+- Restore `src/` to base commit only; delete latest record; promote archived record (via `previousResults` chain) as new latest; create new commit (no history rewrite)
+- `previousResults: null` → delete latest record, no archive to promote
 
 ---
 
 ## Phase 6 — Progress & Observability
 
-**Extended:** `agent.py`, `cli.py`
-
-**What it does:**
-- Stream live token/cost metrics if the agent exposes them via output
-- Periodic fallback: diff src/ vs base commit, report net lines changed
-- Richer CLI output: spinners, task progress bar, cost summary at end
-- `agent-build history <task-id>` — list all archived records for a task
+Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/` vs base commit; spinners and progress bar; `agent-build history <task-id>`.
 
 ---
 
-## Explicit Task Targeting (cross-cutting, add in Phase 2 or 3)
+## Explicit Task Targeting (add in Phase 2–3)
 
-`agent-build run <task-id>` — run a specific task regardless of resume point:
-- **[HIGH]** The discrepancy check and consistency check (`check_consistency()`) are **mandatory prerequisites** even for explicit targeting. The spec states "The system MUST perform a discrepancy check before resume point logic" with no exception. If either check fails (ERROR state), abort immediately — do not proceed to the confirmation prompt.
-- Require explicit user confirmation
-- Write `skipped` records for any intermediate tasks that have no latest record (between the current resume point and the target), following the normal archiving procedure
-- Leave intermediate tasks that already have a latest record untouched
-- Then proceed with normal Task Run for the target task
+`agent-build run <task-id>` — run specific task regardless of resume point.
 
-Add an integration test: `agent-build run <task-id>` with a stale record for a deleted task ID → discrepancy check aborts before confirmation prompt is shown.
+- Discrepancy check and consistency check are **mandatory prerequisites** — abort before confirmation prompt if either fails
+- Confirm with user; write `skipped` records for intermediate tasks with no latest record; leave existing records untouched; then run target task normally
 
 ---
 
-## Edge Cases & Risk Notes
+## Critical Edge Cases
 
-### CRITICAL
+**Task ordering is lexicographic on full directory name.** Formats like `001b-setup-extra` and `01.1-init` are valid — `project.py` must not reject them. Emit a WARNING (not error) for names with no leading alphanumeric prefix. Never sort by discovery order.
 
-**Task ordering must be explicitly lexicographic on task IDs.**
-The resume algorithm relies on "highest-ordered task that has a latest record" and "all tasks before last_task". The spec allows alphanumeric prefixes including formats like `001b-setup-extra` and `01.1-init` — it SHOULD (not MUST) use them; it does NOT restrict to purely zero-padded numeric. Therefore `project.py` **MUST NOT** reject valid spec-compliant alphanumeric IDs. Instead: sort all task IDs by lexicographic order of their full directory name string, and emit a WARNING (not an error) if any task directory name has no leading alphanumeric prefix at all (e.g. bare names like `setup` with no numeric component), since these are likely to produce unintended ordering. Never silently sort by discovery order.
+**Shell injection prevention.** Prompt is passed via stdin; never interpolated into `agent_command`. Use `subprocess` with arg list and `shell=False`.
 
-**Shell injection via task file content in agent_command.**
-`{prompt}` is substituted into `agent_command` which is executed as a shell command. Task file content read from disk becomes part of that substitution. Pass the prompt via `stdin` or a temp file, or use `subprocess` with an argument list (never `shell=True`). Do not interpolate file content directly into the command string.
+**Stale lock: PID reuse.** Check PID exists AND cmdline matches `agent-build`. If unverifiable, refuse and require manual lock removal.
 
-**Stale lock file: OS PID reuse.**
-A PID recorded in the lock file may be reused by an unrelated process after the original agent-build crashes. Checking `psutil.pid_exists(pid)` is not sufficient — also check the process name/cmdline matches `agent-build`. If it cannot be verified, refuse to proceed and require manual lock removal rather than auto-removing it.
+**Malformed result JSON.** `get_latest()` raises `ResultsStoreError` (not `None`). `resume.py` catches it and returns ERROR immediately.
 
-### HIGH
+**Atomic archive failure.** `check_consistency()` detects archived record with no latest record → ERROR in resume.
 
-**Malformed or partial result record JSON.**
-A crash during an atomic write (after temp-file creation, before rename) leaves only the temp file; the latest record is intact. But a crash during the rename on some filesystems can corrupt the target. `ResultsStore.get_latest()` must catch `json.JSONDecodeError` and **raise a `ResultsStoreError`** (a dedicated exception class defined in `results.py`) rather than returning `None` or propagating a bare `JSONDecodeError`. `resume.py` must catch `ResultsStoreError` when calling `get_latest()` and immediately return `ResumePoint(kind=ERROR, message=...)`, so the user knows manual intervention is needed. The `get_latest() -> Optional[ResultRecord]` signature remains unchanged; the error path uses exceptions, not a sentinel return value.
+**Verification output parsing.** Parse last non-empty line. Empty/non-JSON/non-zero-exit → FAIL with synthetic reasoning. Never propagate parse exception.
 
-**Atomic archive failure leaves no latest record.**
-`write()` archives the existing latest record first, then writes the new one. If the process dies between those two steps, there is no latest record but an archived one exists. On next load, `get_latest()` returns `None` for that task while archived records exist — this is an inconsistent state. `ResultsStore` should detect this via a new method **`check_consistency() -> list[str]`** that returns the list of task IDs with archived records but no latest record. `resume.py` **MUST** call `results_store.check_consistency()` as an explicit pre-step (before the discrepancy check) and return `ResumePoint(kind=ERROR, message=...)` if any are found. This pre-step must be documented in the `resume.py` algorithm: insert as new **step 0** before the existing discrepancy check.
+**max_retries exhausted.** Write `failed` record, release lock, exit non-zero. `src/` including `.agent-context/` left as-is for inspection.
 
-**Verification output: last non-empty line, not last line.**
-"Parse last line of output" must strip trailing newlines/whitespace and find the last non-empty line. If the verification agent produces no parseable JSON (empty output, all whitespace, or exits non-zero), treat as FAIL with a synthetic reasoning string — never propagate a parse exception as an unhandled crash.
+**Rollback chain validation.** Verify `previousResults` file exists and is valid before touching any files.
 
-**Verifications must only run after exit-code-0 agent completion.**
-The plan says "after agent completes: run verifications" — clarify: verifications run only when the agent exits with code 0. A non-zero exit code skips verification and goes directly to the retry/fail path. Otherwise verification results are meaningless against a broken workspace.
+**`results/` auto-created.** `write()` calls `mkdir(parents=True, exist_ok=True)`.
 
-**max_retries exhausted must produce a `failed` record and clean exit.**
-When the shared retry counter reaches zero (across timeout retries and verification-failure retries), `task_run.py` must write a `failed` result record, release the lock, and exit with a non-zero status code. It must not leave the run in a `running` state. **`src/` MUST be left as-is** — including `.agent-context/` — because the spec mandates that on timeout or failure the workspace contents are preserved so the user can inspect partial state and trigger an explicit additional run. The workspace prep step on the next run is designed to detect an existing `.agent-context/` and prompt for confirmation before overwriting it.
+**`cwd=src/` for all subprocesses.** Both `agent.py` and `verification.py` must set `cwd=<root>/src/`. Failure produces silent wrong output.
 
-**Rollback: validate `previousResults` chain before starting.**
-Before touching any files, `rollback.py` must verify that the file named in `previousResults` actually exists in the results directory. If the chain is broken (file missing or itself malformed), abort with an error — do not partially restore src/ and leave results in an inconsistent state.
+**`project.py` validation.** Abort if any task directory lacks `TASK.md`; abort if `tasks/` has no subdirectories (distinct error from `tasks/` absent).
 
-**results/ directory must be created by `write()` if absent.**
-Phase 1 states "results dir absent → all get_latest calls return None". Phase 2 adds `write()`. `write()` must `mkdir(parents=True, exist_ok=True)` before writing, otherwise the first write to a fresh project fails with `FileNotFoundError`.
+**Lock file atomicity.** Use `O_CREAT | O_EXCL | O_WRONLY`. Lock released in `finally` block including on `KeyboardInterrupt`.
 
-**Agent and verification subprocesses must be invoked with `cwd=src/`.**
-The spec states "the agent operates within the workspace." The constructed prompt references `.agent-context/task/TASK.md`, `.agent-context/global/GLOBAL.md`, and `.agent-context/verifications/` as relative paths. If the subprocess is launched from the project root, none of these paths resolve and the agent cannot find its instructions. Both `agent.py` and `verification.py` **MUST** set `cwd=<project_root>/src/` when invoking the subprocess. Failure to do so will silently produce empty or hallucinated agent output with no error — a very difficult bug to diagnose.
-
-**`project.py` must abort if a task directory is missing `TASK.md`.**
-The spec states: "if a task directory exists without a `TASK.md`, the system MUST abort with an error." `project.py` must check for the presence of `TASK.md` inside each discovered task subdirectory when loading the project, and raise a `ProjectError` immediately rather than returning a `Task` with no entrypoint. Discovering this at validation time (not at agent invocation time) prevents a confusing failure mid-run.
-
-**`project.py` must abort if `tasks/` contains no task subdirectories.**
-The spec states: "If `tasks/` contains no task subdirectories, the system MUST abort with an error." `project.py` must enforce this after scanning the `tasks/` directory. An empty `tasks/` directory is not the same as `tasks/` being absent (which is separately checked in preflight); both conditions must be caught and reported with distinct error messages.
-
-**Lock file must be acquired atomically.**
-`preflight.py` must create the lock file using `open(..., flags=os.O_CREAT | os.O_EXCL | os.O_WRONLY)` (or equivalent). A non-atomic approach — check-then-create — introduces a race window where two concurrent `agent-build run` invocations both observe no lock file and both proceed. The `O_EXCL` flag ensures only one process succeeds; the other gets `FileExistsError` and must treat it as a live lock (applying the PID-verification logic from the CRITICAL stale-lock note above).
-
-**Lock file must be released in a `finally` block.**
-`task_run.py` must release the lock file in a `try/finally` (or context manager) that wraps the entire run after the lock is acquired. Any unhandled exception that propagates out of `task_run.py` after lock acquisition — including `KeyboardInterrupt` — must still release the lock. Without this, a crash leaves a stale lock requiring manual removal on every subsequent run.
-
-**Signal handler must kill the agent subprocess.**
-If the user sends SIGINT (Ctrl+C) or the process receives SIGTERM during agent execution, the agent subprocess must be killed (not just left to run in the background as an orphan). `agent.py` must install a signal handler (or use `subprocess.Popen` within a `try/finally`) that calls `process.kill()` before re-raising the signal or letting the exception propagate. Without this, Ctrl+C during a long agent run leaves an orphaned subprocess still writing to `src/` — a confusing and potentially dangerous state. The `running` record will remain; the next run will encounter `NEEDS_CONFIRMATION`, which is correct behavior.
-
-**`src/` must exist and be checked in preflight.**
-The spec lists `src/` as a required top-level directory. `preflight.py` must explicitly check that `src/` exists and is a directory; if absent, abort with an error. Without `src/`, workspace preparation will fail with an obscure `FileNotFoundError` deep inside `workspace.py` rather than a clear preflight error. This check belongs alongside the `tasks/` and `verifications/` checks.
-
-**Agent prompt must conditionally omit global-instructions reference when `GLOBAL.md` is absent.**
-The example prompt includes a reference to `.agent-context/global/GLOBAL.md`. If `global/` is absent (or present but empty), that file does not exist in the agent's working directory. `task_run.py` must construct the prompt conditionally: include the global-instructions paragraph only when `GLOBAL.md` was actually copied into `.agent-context/global/`. Referencing a nonexistent file in the prompt may cause the agent to stall, hallucinate its contents, or return an error — all silent failures from the system's perspective.
-
----
+**Conditional global prompt.** Include global-instructions paragraph in prompt only when `GLOBAL.md` was actually copied.
 
 ---
 
 ## Testing
 
-All tests use `pytest`. Filesystem fixtures use `tmp_path`. No mocking of subprocess except where explicitly noted. A fake agent subprocess is used for integration tests — it writes to `src/` and exits with a configurable exit code.
+`pytest` with `tmp_path` fixtures. No subprocess mocking except where noted. Integration tests use a real temp git repo and a fake agent subprocess (configurable exit code).
 
-### Unit Tests
+### Critical Unit Tests
 
-#### `types.py`
-- `TaskRunStatus` enum values match JSON string literals exactly
-- `ResultRecord` serializes to camelCase JSON; `skipped` records include only `status` and `previousResults`
+- `project.py`: lexicographic sort of `001-a`, `001b-extra`, `002-b`; alphanumeric IDs accepted; missing `TASK.md` → `ProjectError`; empty `tasks/` → `ProjectError`
+- `results.py`: malformed JSON → `ResultsStoreError`; `check_consistency()` detects broken chain; `write()` creates dir; archive order logic; atomic temp-rename
+- `resume.py`: consistency check → ERROR before discrepancy check; `ResultsStoreError` → ERROR; discrepancy → ERROR; all `skipped` → COMPLETE; gap in records → ERROR
+- `preflight.py`: `O_EXCL` atomicity; stale lock PID scenarios; `src/` absent → error
+- `agent.py`: prompt via stdin not argv; `cwd=src/`; SIGINT kills subprocess
+- `verification.py`: last non-empty line; empty/non-zero/non-JSON → FAIL with synthetic reasoning; `cwd=src/`; timeout uses `verification_timeout_seconds`
+- `task_run.py`: `max_retries` exhausted → `failed` + non-zero exit; shared retry counter across timeout+verification failures; lock released on unhandled exception; `running` record includes `base_commit`; global prompt conditional
+- `rollback.py`: broken `previousResults` chain → abort before file changes; `previousResults: null` path
 
-#### `project.py`
-- **[CRITICAL]** Lexicographic ordering: tasks `001-a`, `002-b`, `001b-extra` sort as `001-a`, `001b-extra`, `002-b`
-- **[CRITICAL]** Alphanumeric IDs `01.1-init`, `001b-setup-extra` accepted (not rejected)
-- **[HIGH]** Missing `TASK.md` in any task directory raises `ProjectError`
-- **[HIGH]** Empty `tasks/` directory raises `ProjectError` with a message distinct from "tasks/ absent"
-- Warning (not error) emitted when a task directory name has no leading alphanumeric prefix
-- `global/` absent → project loads without error, `project.global_path` is `None`
+### Critical Integration Tests
 
-#### `results.py`
-- **[HIGH]** `get_latest()` raises `ResultsStoreError` (not `JSONDecodeError`, not `None`) when JSON is malformed
-- **[HIGH]** `check_consistency()` returns task IDs that have archived records but no latest record
-- `check_consistency()` returns `[]` when results dir is absent
-- `get_latest()` returns `None` when results dir is absent
-- `get_latest()` returns `None` when no file for that task ID exists
-- **[HIGH]** `write()` creates results dir if absent (`mkdir` before write, no `FileNotFoundError`)
-- `write()` on a fresh task: writes `results-<id>.json` with `previousResults: null`
-- `write()` on existing latest: archives to `results-<id>--run-1.json`, writes new latest with `previousResults` pointing to archived filename
-- `next_archive_order()` returns 1 when no archives exist; returns `max+1` when archives have gaps (e.g. only `run-3` exists → returns 4)
-- Atomic write: temp file renamed; existing latest intact if `os.rename` raises mid-write (simulate via mock)
-- `list_task_ids_in_store()` parses both latest and archived filenames correctly
-
-#### `resume.py`
-- **[HIGH]** `check_consistency()` non-empty → `ResumePoint(kind=ERROR)` before any other step
-- **[HIGH]** `get_latest()` raises `ResultsStoreError` → `ResumePoint(kind=ERROR)`
-- **[CRITICAL]** Record file references task ID not in `project.tasks` → ERROR
-- No records → READY pointing to first task
-- Single `running` task → NEEDS_CONFIRMATION
-- Two `running` tasks → ERROR
-- Last task `failed` → READY (re-run last task)
-- All tasks `completed` with more tasks remaining → READY (first unrecorded task)
-- All tasks `completed`, no further tasks → COMPLETE
-- **All tasks `skipped`, no further tasks → COMPLETE** (verify `skipped`-only history is treated as fully complete)
-- `skipped` treated as success: `[completed, skipped, <no record>]` → READY (third task)
-- Gap in records: tasks 1 and 3 `completed`, task 2 has no record → ERROR
-- Non-success intermediate: task 1 `completed`, task 2 `failed`, task 3 `completed` → ERROR
-- Task ordering uses lexicographic order (not insertion order)
-
-#### `config.py`
-- Missing config file → all defaults applied
-- Partial config file → missing fields use defaults, present fields override
-- `{model}` substitution happens at invocation time, not at load time
-- Unknown fields in config do not raise (forward compatibility)
-
-#### `preflight.py`
-- **[CRITICAL]** Lock file with PID of a running `agent-build` process → abort with error
-- **[CRITICAL]** Lock file with PID of a running unrelated process → refuse and require manual removal (not auto-remove)
-- **[CRITICAL]** Lock file with a non-existent PID → treat as stale, remove, proceed with informational message
-- **[HIGH]** Two concurrent processes attempt lock acquisition simultaneously → only one succeeds; the other sees `FileExistsError` and applies PID-verification logic (verify via `O_EXCL` mock that creation is atomic)
-- **[HIGH]** `src/` absent → abort with error (distinct message from `tasks/` absent)
-- No lock file → proceed normally, lock file created
-- Non-git directory → abort with error
-- `tasks/` absent → abort with error
-- `verifications/` absent → abort with error
-- Uncommitted changes → requires user confirmation; if confirmed, proceeds; if denied, aborts
-- Untracked files → requires user confirmation (same path as uncommitted changes)
-- Clean working tree → proceeds without confirmation
-
-#### `workspace.py`
-- Task dir contents copied to `src/.agent-context/task/`
-- `global/` contents copied to `src/.agent-context/global/` when present
-- `global/` absent → `src/.agent-context/global/` not created, no error
-- `verifications/` contents copied to `src/.agent-context/verifications/`
-- Existing `src/.agent-context/` → requires user confirmation; if confirmed, deleted and recreated; if denied, aborts
-
-#### `verification.py`
-- **[HIGH]** Last non-empty line parsed as JSON: output with trailing blank lines → correct JSON extracted
-- **[HIGH]** Empty output → FAIL with synthetic reasoning string (no unhandled exception)
-- **[HIGH]** All-whitespace output → FAIL with synthetic reasoning string
-- **[HIGH]** Non-zero exit code from verification agent → FAIL with synthetic reasoning string
-- **[HIGH]** Verification subprocess exceeds `verification_timeout_seconds` → killed, returns FAIL with synthetic reasoning (verify that `verification_timeout_seconds` from config is passed as `timeout` argument to subprocess call)
-- Last non-empty line is not valid JSON → FAIL with synthetic reasoning (no `json.JSONDecodeError` propagated)
-- Valid PASS response → `("PASS", reasoning)` returned
-- Valid FAIL response → `("FAIL", reasoning)` returned
-- **[HIGH]** Subprocess invoked with `cwd=<project_root>/src/` (verified via mock capturing kwargs)
-- Verification prompt includes: verification file content + task reference + structured response instruction appended
-
-#### `agent.py`
-- **[CRITICAL]** Prompt passed via stdin, never interpolated into command string (verify with mock that stdin receives prompt, argv does not)
-- **[HIGH]** Subprocess invoked with `cwd=<project_root>/src/` (verified via mock)
-- **[HIGH]** SIGINT during agent execution → subprocess killed, signal re-raised; no orphaned process left running
-- `AgentStarted` event emitted before subprocess starts
-- `AgentOutput` events emitted per output chunk
-- `AgentCompleted` event emitted with correct `exit_code`
-- `AgentTimedOut` event emitted when process exceeds `agent_timeout_seconds`; process killed (not left as orphan)
-- Non-zero exit code: `AgentCompleted` emitted (not swallowed)
-
-#### `task_run.py` — retry logic
-- **[HIGH]** `max_retries` exhausted → `failed` record written, lock released, process exits non-zero; `src/` (including `.agent-context/`) is left as-is per spec
-- **[HIGH]** After `max_retries` exhausted, status is `failed` (not `running`)
-- **[HIGH]** Unhandled exception after lock acquisition → lock file released via `finally` block (verify lock absent after exception)
-- **[HIGH]** Prompt excludes global-instructions paragraph when `GLOBAL.md` absent; includes it when present (verify prompt content via mock)
-- **[HIGH]** `running` record written before agent invocation must include `base_commit` field set to current HEAD (rollback depends on this value; verify via mock capturing written record content)
-- Timeout retry uses identical prompt (not modified)
-- Verification failure retry appends only the most recent failure reasoning (not accumulated)
-- **[HIGH]** Shared retry counter spans both timeout retries and verification-failure retries in sequence: `max_retries=2`, one timeout retry then one verification-failure retry → second retry attempt exhausts counter → `failed` record written (not just testing each type separately)
-- Non-zero agent exit code → no retry, immediate fail, no verification executed
-
-#### `rollback.py`
-- **[HIGH]** `previousResults` file referenced but missing → abort before any file changes
-- **[HIGH]** `previousResults` file malformed JSON → abort before any file changes
-- Latest record status `skipped` → abort with error
-- Base commit not in git history → abort with error
-- Uncommitted changes present → abort with error
-- Untracked files present → abort with error
-- Happy path: `src/` restored to base commit, latest record deleted, archived record promoted to latest, new commit created
-- **`previousResults: null` → latest record deleted, no archive promoted, new commit created** (first-ever run rollback; no chain to restore)
-- Only `src/` restored; `tasks/`, `verifications/`, other `results/` files untouched
-
-#### `task_run.py` — commit staging
-- Commit stages only files within `src/` and `results/`
-- No changes in both `src/` and `results/` → abort with error
-
----
-
-### Integration Tests
-
-These use a real temporary git repo and a fake agent subprocess (writes a file to `src/`, exits with a configurable code).
-
-#### Happy path (Phase 1–2)
-- Full run from first task: resume point → preflight → workspace copy → `running` record written before agent → `completed` record written after → `.agent-context/` removed → commit staged to `src/` and `results/` only
-
-#### Resume after failure
-- Project with 3 tasks; task 2 has a `failed` latest record → resume point is task 2 → re-executes task 2
-
-#### All tasks complete
-- All tasks `completed` → `agent-build status` shows COMPLETE; `agent-build run` reports complete, no execution
-
-#### Discrepancy check
-- `results/` contains a record for task `999-deleted` not in `tasks/` → `agent-build run` aborts with ERROR, no side effects
-
-#### Consistency check (atomic archive failure simulation)
-- Manually create `results-001-setup--run-1.json` with no corresponding `results-001-setup.json` → `agent-build run` aborts with ERROR
-
-#### Lock file contention
-- Lock file with non-existent PID → treated as stale, removed, run proceeds
-- Lock file with PID of unrelated running process → aborts, requires manual removal
-
-#### Verification flow (Phase 4)
-- Agent exits 0, first verification FAILs → reasoning appended to prompt → agent retried
-- Agent exits 0, all verifications PASS → `completed` record written
-- Agent exits non-zero → verifications skipped, `failed` record written
-
-#### max_retries exhausted (Phase 4)
-- `max_retries=1`; agent exits 0 but verification always FAILs → after 1 retry, `failed` record written, non-zero exit code
-
-#### Rollback (Phase 5)
-- Run task 1 (commits), then rollback: `src/` reverted, new commit created, latest record deleted, archived record promoted
-- Rollback with `previousResults: null`: latest record deleted, no archive promoted
-- Rollback blocked by uncommitted changes
-
-#### Explicit task targeting
-- `agent-build run 003-feature` with tasks 1 and 2 having no records: writes `skipped` records for 1 and 2 (with archiving), then runs 3
-- **[HIGH]** `agent-build run <task-id>` with a stale record for a deleted task ID → discrepancy check aborts before the explicit-target confirmation prompt is shown (no side effects, no `skipped` records written)
-- `agent-build run <task-id>` where intermediate tasks already have latest records → those records left untouched; only tasks with no record receive `skipped`
-
-#### Ordering edge cases (CRITICAL)
-- Tasks `001-a`, `001b-extra`, `002-b` all accepted and sorted lexicographically; resume logic uses that order
-
-#### SIGINT during agent execution (HIGH)
-- Start a real run; send SIGINT to the `agent-build` process mid-agent; verify: (a) the agent subprocess is killed (not left as orphan), (b) the `running` record remains (not overwritten with `failed`), (c) the lock file is released, (d) a subsequent `agent-build run` shows `NEEDS_CONFIRMATION`
-
----
-
-## Key Design Principles
-
-1. `task_run.py` is the composition root — it wires together preflight, workspace,
-   agent, verification, and result recording. Each phase adds to it without changing
-   the interface other modules expose.
-2. All state mutation (records, workspace, commits) goes through dedicated modules —
-   `task_run.py` orchestrates but does not directly touch the filesystem.
-3. `resume.py` is pure — it takes `Project` and `ResultsStore` and returns a
-   `ResumePoint`. No side effects, fully testable.
-4. The EventEmitter (Phase 3) is the only shared mutable object within a task run;
-   all components that need to react to agent progress subscribe rather than polling.
+- Full happy path: resume → preflight → workspace → running record → agent → completed record → cleanup → commit
+- Resume after failure: task 2 `failed` → re-runs task 2
+- Discrepancy check: stale record for deleted task → abort before any side effects
+- Consistency check: archived record with no latest → abort
+- Verification flow: FAIL → retry with reasoning appended; all PASS → completed; non-zero exit → skip verification
+- `max_retries=1` with always-failing verification → `failed` record after 1 retry
+- Rollback: src/ reverted, commit created, record chain restored; blocked by dirty working tree
+- Explicit targeting: `agent-build run <id>` with stale record → discrepancy check aborts before confirmation prompt
+- SIGINT: subprocess killed, `running` record remains, lock released, next run shows NEEDS_CONFIRMATION
+- Lexicographic ordering: `001-a`, `001b-extra`, `002-b` all accepted and sorted correctly
