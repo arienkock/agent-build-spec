@@ -179,8 +179,8 @@ Fields and defaults:
   detect and confirm overwrite of existing context dir
 - Write `running` record before agent stub; write `completed` record after
 - Archive existing latest record before writing new one (atomic: write temp → rename)
-- Remove src/.agent-context/ before committing
-- Abort with error if there are no changes in **either** src/ **or** results/ to stage (i.e. both are empty — nothing to commit)
+- Remove src/.agent-context/ before committing (success path only; on failure/timeout it is left as-is per spec)
+- Abort with error if there are no changes in **both** src/ **and** results/ (i.e. nothing to commit)
 - Create git commit staging only src/ and results/
 - task_run.py stub: preflight → workspace → write running record → (no agent yet, sleep 1s) →
   write completed record → cleanup → commit
@@ -233,7 +233,7 @@ partial workspace state preserved on failure.
 
 **What it does:**
 - After agent completes **with exit code 0**: run verifications in lexicographical order;
-  a non-zero exit code skips verification entirely and goes directly to the retry/fail path
+  a non-zero exit code skips verification entirely and goes directly to the **fail path (no retry)**
 - Each verification: invoke agent with verification file content + task reference +
   structured response instruction appended
 - Parse the **last non-empty line** of output as `{"status": "PASS"|"FAIL", "reasoning": "..."}`
@@ -446,7 +446,7 @@ All tests use `pytest`. Filesystem fixtures use `tmp_path`. No mocking of subpro
 - Happy path: `src/` restored to base commit, latest record deleted, archived record promoted to latest, new commit created
 - Only `src/` restored; `tasks/`, `verifications/`, other `results/` files untouched
 
-#### `results.py` — commit staging
+#### `task_run.py` — commit staging
 - Commit stages only files within `src/` and `results/`
 - No changes in both `src/` and `results/` → abort with error
 
