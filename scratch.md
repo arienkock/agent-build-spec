@@ -73,6 +73,8 @@ The Resume Point is the task selected for execution before a Task Run begins. Th
 - **All records are successful, and further tasks exist with no records** — the first task without a record is the resume point.
 - **All tasks have successful records and no further tasks exist** — the project is complete; there is nothing to run.
 
+For the purpose of resume point logic, `skipped` is treated as equivalent to `completed`.
+
 Any other state — such as a failed or missing result for an intermediate task followed by a successful result for a later task — is ambiguous. The system **MUST** abort with an error in such cases, requiring manual intervention before proceeding.
 
 As an exception, the user **MAY** explicitly request execution of a specific task out of sequence. The system **MUST** require explicit user confirmation before proceeding. If confirmed, the system **MUST** write a results record with status `skipped` for each intermediate task that has no latest record, following the normal archiving procedure. Intermediate tasks that already have a latest record are left untouched. This makes the state unambiguous before proceeding.
@@ -117,7 +119,7 @@ The agent operates in-place within `src/`. The system **MUST** copy context file
 └── verifications/ # contents of verifications/
 ```
 
-The system **MUST** ensure that `src/.agent-context/` does not already exist before copying; if it does, the task run **MUST** abort with an error. The error **SHOULD** indicate that a previous run likely left the directory behind and that it must be removed before proceeding. The system **MAY** offer to remove it on the user's behalf.
+The system **MUST** ensure that `src/.agent-context/` does not already exist before copying; if it does, the system **MUST** require explicit user confirmation before proceeding. The prompt **SHOULD** indicate that a previous run likely left the directory behind. If confirmed, the system **MUST** delete it before proceeding with the copy.
 
 ### Agent Invocation
 
@@ -131,11 +133,20 @@ Upon agent completion, verifications are executed in lexicographical order of th
 
 ### Retries and Timeouts
 
-Task runs **MUST** support a configurable timeout for agent execution. If the agent exceeds this timeout, the system **MUST** retry it with the same prompt that was used for the timed-out invocation, up to a configurable retry limit. The retry prompt is intentionally identical to the original: capable agents are expected to inspect the workspace, identify what has already been done, and continue from there without explicit instruction. If the agent terminates with an error, no retry is attempted and the task run **MUST** be recorded as failed. Verification failures trigger a retry as described above, also subject to a configurable retry limit.
+Task runs **MUST** support a configurable timeout for agent execution. If the agent exceeds this timeout, the system **MUST** retry it with the same prompt that was used for the timed-out invocation. The retry prompt is intentionally identical to the original: capable agents are expected to inspect the workspace, identify what has already been done, and continue from there without explicit instruction. If the agent terminates with an error, no retry is attempted and the task run **MUST** be recorded as failed. Verification failures trigger a retry as described above. All retries — whether caused by timeouts or verification failures — draw from a single shared configurable retry limit.
 
 ### Result Recording and Commit
 
 Before committing, the system **MUST** remove `src/.agent-context/`. Successful task runs **MUST** then append a results record and create a commit.
+
+### Rollback
+
+The system **MUST** support rollback of the latest task run, regardless of its status. A failed task run will not normally have a commit, since auto-commit only occurs on success; however, if the user manually committed the workspace after a failed run, the rollback procedure handles this correctly — `src/` is restored to the base commit state and a new commit is created. Before performing a rollback, the system **MUST** verify that the repository has no uncommitted changes and no untracked files; if any are found, the rollback **MUST** abort with an error. When a rollback is performed:
+
+1. The contents of `src/` **MUST** be restored to the state at the base commit recorded in the latest results record. Only `src/` is restored; other files that may have been committed after the base commit (e.g. in `tasks/`, `verifications/`, or `results/`) are left untouched.
+2. The latest results record (`results-<Task ID>.json`) **MUST** be deleted.
+3. If a previous archived results record exists (as referenced by the `previousResults` field of the deleted record), it **MUST** be renamed back to `results-<Task ID>.json`, restoring it as the latest record.
+4. The resulting changes **MUST** be recorded as a new commit. Git history is append-only; rollback never rewrites or removes existing commits.
 
 ---
 
