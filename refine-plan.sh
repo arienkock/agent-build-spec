@@ -30,7 +30,7 @@ for i in {1..7}; do
   runClaude "Add any important notes for handling edge cases and exceptions to the implementation plan. Limit yourself to HIGH and CRITICAL risks."
   runClaude "Add essential unit and integration test cases for all major components. Focus on HIGH and CRITICAL risk areas and edge cases."
   
-  WORD_COUNT=$(wc -w implementation-plan.md)
+  WORD_COUNT=$(wc -w < implementation-plan.md)
   while [ "$WORD_COUNT" -gt 2100 ]; do
     echo "The implementation plan is too long ($WORD_COUNT words)."
     claudeNoCount "Rewrite it to be concise and clear, while retaining all critical information. Limit it to 2000 words or less."

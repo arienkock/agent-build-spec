@@ -278,10 +278,13 @@ partial workspace state preserved on failure.
 ## Explicit Task Targeting (cross-cutting, add in Phase 2 or 3)
 
 `agent-build run <task-id>` — run a specific task regardless of resume point:
+- **[HIGH]** The discrepancy check and consistency check (`check_consistency()`) are **mandatory prerequisites** even for explicit targeting. The spec states "The system MUST perform a discrepancy check before resume point logic" with no exception. If either check fails (ERROR state), abort immediately — do not proceed to the confirmation prompt.
 - Require explicit user confirmation
-- Write `skipped` records for any intermediate tasks that have no latest record
+- Write `skipped` records for any intermediate tasks that have no latest record (between the current resume point and the target), following the normal archiving procedure
 - Leave intermediate tasks that already have a latest record untouched
 - Then proceed with normal Task Run for the target task
+
+Add an integration test: `agent-build run <task-id>` with a stale record for a deleted task ID → discrepancy check aborts before confirmation prompt is shown.
 
 ---
 
