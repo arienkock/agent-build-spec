@@ -157,6 +157,16 @@ class ResultsStore:
 
         return has_archived - has_latest
 
+    def next_archive_filename(self, task_id: str) -> Optional[str]:
+        """
+        Return the filename the current latest record will be archived as,
+        or None if there is no current latest record.
+        """
+        if not self._latest_path(task_id).exists():
+            return None
+        order = self._next_archive_order(task_id)
+        return f"results-{task_id}--run-{order}.json"
+
     def write(self, task_id: str, record: ResultRecord) -> None:
         """
         Write record as the latest result for task_id.
