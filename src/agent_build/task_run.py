@@ -3,12 +3,15 @@ from __future__ import annotations
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import click
 
 from . import preflight as preflight_mod
 from . import workspace as workspace_mod
+from .agent import AgentOutcome, build_prompt, run_agent
 from .config import Config
+from .events import AgentEvent, AgentOutput, EventEmitter
 from .preflight import PreflightError, release_lock
 from .results import ResultsStore
 from .types import ResultRecord, Task, TaskRunStatus
@@ -55,16 +58,34 @@ def _stage_and_commit(project_root: Path, task_id: str) -> None:
         text=True,
     )
     if commit.returncode != 0:
-        detail = (commit.stderr.strip() or commit.stdout.strip())
+        detail = commit.stderr.strip() or commit.stdout.strip()
         raise TaskRunError(detail)
 
 
-def _invoke_agent(project_root: Path, task: Task, config: Config) -> None:
-    """
-    Invoke the agent subprocess.
-    Phase 2: stubbed. Phase 3 will replace this with real agent invocation.
-    """
-    click.echo("(Agent invocation stubbed — Phase 2)")
+def _write_failed_record(
+    store: ResultsStore,
+    task_id: str,
+    base_commit: Optional[str],
+    start_time: Optional[str],
+) -> None:
+    """Archive the current latest record and write a FAILED record."""
+    prev = store.next_archive_filename(task_id)
+    store.write(
+        task_id,
+        ResultRecord(
+            status=TaskRunStatus.FAILED,
+            previous_results=prev,
+            base_commit=base_commit,
+            start_time=start_time,
+            end_time=_now_iso(),
+        ),
+    )
+
+
+def _on_agent_event(event: AgentEvent) -> None:
+    """Default event listener: print agent output to stdout."""
+    if isinstance(event, AgentOutput):
+        click.echo(event.chunk, nl=False)
 
 
 def run_task(
@@ -78,16 +99,21 @@ def run_task(
     Execute the full task-run cycle for *task*:
 
       preflight → [write skipped records] → running record → workspace prep
-      → agent → completed record → cleanup agent-context → commit
+      → agent retry loop → completed record → cleanup agent-context → commit
 
     *tasks_to_skip* is an optional list of tasks (preceding the target in
     explicit-targeting mode) that have no latest record and should be written
     as SKIPPED.  Writing them here — after the lock is acquired and the
-    dirty-tree check has passed — avoids a spurious second dirty-tree prompt
-    that would occur if they were written before preflight.
+    dirty-tree check has passed — avoids a spurious second dirty-tree prompt.
 
-    Phase 2: agent invocation is stubbed (always succeeds).
+    Preflight and workspace preparation run exactly once per task run; retries
+    reuse the already-prepared workspace.  The shared retry counter covers both
+    timeout retries (Phase 3) and verification-failure retries (Phase 4).
+
     The project lock is acquired during preflight and released in a finally block.
+    SIGTERM installs a handler inside run_agent that kills the subprocess, reaps
+    it, and raises SystemExit(1), which propagates through here and releases the
+    lock; the RUNNING record then persists for NEEDS_CONFIRMATION on the next run.
     """
     lock_path = project_root / ".agent-build.lock"
     lock_acquired = False
@@ -121,8 +147,46 @@ def run_task(
         # ── Workspace preparation (once per task run) ──────────────────────────
         workspace_mod.prepare(project_root, task)
 
-        # ── Agent invocation (Phase 2: stub) ──────────────────────────────────
-        _invoke_agent(project_root, task, config)
+        # ── Build prompt (once; reused for all retries) ────────────────────────
+        prompt = build_prompt(project_root)
+
+        emitter = EventEmitter()
+        emitter.subscribe(_on_agent_event)
+
+        # ── Agent retry loop ───────────────────────────────────────────────────
+        retries_left = config.max_retries
+
+        while True:
+            result = run_agent(project_root, config, prompt, emitter)
+
+            if result.outcome == AgentOutcome.LAUNCH_ERROR:
+                _write_failed_record(store, task.id, base_commit, running_record.start_time)
+                raise TaskRunError(
+                    f"Failed to launch agent: {result.error}"
+                )
+
+            if result.outcome == AgentOutcome.FAILED:
+                _write_failed_record(store, task.id, base_commit, running_record.start_time)
+                raise TaskRunError(
+                    f"Agent exited with non-zero exit code: {result.exit_code}"
+                )
+
+            if result.outcome == AgentOutcome.TIMED_OUT:
+                if retries_left <= 0:
+                    _write_failed_record(
+                        store, task.id, base_commit, running_record.start_time
+                    )
+                    raise TaskRunError(
+                        "Agent timed out and the retry limit is exhausted."
+                    )
+                retries_left -= 1
+                click.echo(
+                    f"Agent timed out. Retrying ({retries_left} retries remaining)..."
+                )
+                continue  # retry with the same prompt
+
+            # AgentOutcome.COMPLETED — break out of retry loop
+            break
 
         # ── Write COMPLETED record ─────────────────────────────────────────────
         prev_for_completed = store.next_archive_filename(task.id)
@@ -144,7 +208,6 @@ def run_task(
         except TaskRunError as exc:
             msg = str(exc)
             if msg.startswith("No changes to commit"):
-                # Distinct error: nothing staged — propagate as-is
                 raise TaskRunError(msg) from exc
             # Git commit failed (e.g. pre-commit hook rejected the commit).
             # src/ and the staged index are mutated but not committed.
