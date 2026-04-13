@@ -163,6 +163,15 @@ Complete the task. When you are done, stop. Verifications will be run automatica
 - **Retry prompt:** `{original_prompt}\n\n---\n\nThe following verification failed. Review the reasoning and correct the issue.\n\nVerification: \`.agent-context/verifications/{id}.md\`\n\nReasoning:\n{reasoning}` — `{id}` is the filename stem; only the most recent failure is appended.
 - Timeout and verification-failure retries share `max_retries`; exhausted → `failed` record, `src/` left as-is for inspection
 
+**`--skip-build` flag** (`agent-build run --skip-build`): skips the agent invocation entirely and jumps straight to verifications. Intended for the case where the user has manually fixed `src/` after a failed build and wants the tool to verify and commit without re-running the agent.
+
+- Print `"Skipping build step (--skip-build)."` in place of the agent invocation message.
+- Verifications proceed as normal; retry loop also still applies — if a verification fails, the user is prompted again.
+- If verifications pass (or there are none), the task completes and commits normally.
+- Implementation: boolean `skip_build` threaded from `cli.py` → `run_task()` → wraps the agent retry loop in `if not skip_build:`.
+- `--skip-build` implies the user accepts the current state of `src/`; it does not interact with `--yes` (confirmation prompts are separate).
+- Test cases: `--skip-build` on a fresh task → skips agent, runs verifications, writes completed record; `--skip-build` with failing verification → retry loop activates normally; `--skip-build` + `--yes` → no prompts at all.
+
 ---
 
 ## Phase 5 — Rollback
@@ -204,7 +213,7 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 | `workspace.py` | `.agent-context` added to gitignore; no duplicate append; `!.agent-context` negation present → still appends non-negated line; `.agent-context/` (with trailing slash) in gitignore → bare `.agent-context` still appended (partial match is not an exact match); global absent → skip; existing `.agent-context/` triggers confirm |
 | `agent.py` | Prompt via stdin not argv; `cwd=src/`; SIGINT kills then `wait()` reaps; SIGTERM handler installed → kills + `wait()` + raises `SystemExit`; timeout → kill + `wait()` + event; resume preserves `base_commit`; `OSError` → failed, no retry |
 | `verification.py` | Last non-empty line parsed; non-zero/empty/non-JSON/timeout → FAIL synthetic; `cwd=src/`; no files → skip; lexicographic halt on first FAIL; `{id}` is filename stem; `OSError` → FAIL synthetic; SIGINT → kill + re-raise; multiple verifications: second fails → retry prompt contains only second's reasoning (not first's); JSON with extra fields alongside valid `status: PASS` → valid PASS |
-| `task_run.py` | `max_retries` exhausted → failed; lock released on exception; global prompt conditional; retry prompt has latest failure only; non-zero → verification skipped; `.agent-context/` removed on success only; commit aborts if no changes; commit failure on success path → record reverted to `failed`, clear error; explicit targeting: failed intermediate untouched; completed target archives old record; shared counter exhausted by mixed timeout+verification failures; workspace prep and preflight not repeated on any retry; explicit targeting with nonexistent task ID → abort with clear error before any mutation; explicit targeting where target is the first task → no skipped records created |
+| `task_run.py` | `max_retries` exhausted → failed; lock released on exception; global prompt conditional; retry prompt has latest failure only; non-zero → verification skipped; `.agent-context/` removed on success only; commit aborts if no changes; commit failure on success path → record reverted to `failed`, clear error; explicit targeting: failed intermediate untouched; completed target archives old record; shared counter exhausted by mixed timeout+verification failures; workspace prep and preflight not repeated on any retry; explicit targeting with nonexistent task ID → abort with clear error before any mutation; explicit targeting where target is the first task → no skipped records created; `--skip-build` skips agent loop, verifications still run; `--skip-build` with failing verification → retry loop activates; `--skip-build` + `--yes` → no prompts, verifications proceed |
 | `config.py` | Missing file → all defaults; zero/negative timeout → error; extra fields ignored; `{0}` in command → error; `{unknown}` in command → error; `{model}` only → valid; `{model}` substituted but remaining `{something}` present → validation error; empty `agent_command` string → validation error; argv split for `shell=False` |
 | `results.py` | Malformed JSON → `ResultsStoreError`; valid JSON missing `status` field → `ResultsStoreError`; non-existent → `None`; archive numbering with gaps; atomic write; consistency detects broken chain; `write()` creates dir; skipped serializes only `status` + `previousResults`; camelCase keys |
 | `rollback.py` | No records → abort before any mutation (guard #0); missing `previousResults` file → abort before changes; null chain → delete only; skipped → abort; missing base commit → abort; guard order enforced; archive moved not copied; no-change → clear error, no empty commit; lock already held → abort before mutation |
@@ -230,3 +239,6 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 - **Gitignore idempotent:** second run on project that already has `.agent-context` in `src/.gitignore` → no duplicate line appended
 - **All tasks skipped via explicit targeting:** target last task with all intermediates having no records → skipped records written for intermediates; after success, `agent-build status` shows COMPLETE
 - **No-change commit:** no file changes → abort with clear error
+- **`--skip-build` happy path:** no agent invoked, verifications run, completed record written, commit created
+- **`--skip-build` with failing verification:** verification FAIL triggers retry loop; agent still not invoked on retry; exhausted retries → failed record
+- **`--skip-build` + `--yes`:** no confirmation prompts, proceeds directly to verifications
