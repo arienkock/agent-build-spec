@@ -94,6 +94,7 @@ def run_task(
     store: ResultsStore,
     config: Config,
     tasks_to_skip: list[Task] | None = None,
+    yes: bool = False,
 ) -> None:
     """
     Execute the full task-run cycle for *task*:
@@ -120,7 +121,8 @@ def run_task(
 
     try:
         # ── Preflight (once per task run; acquires lock) ──────────────────────
-        base_commit = preflight_mod.run(project_root)
+        click.echo("Running preflight checks...")
+        base_commit = preflight_mod.run(project_root, yes=yes)
         lock_acquired = True
 
         # ── Write SKIPPED records for any explicit-targeting intermediates ─────
@@ -145,7 +147,8 @@ def run_task(
         store.write(task.id, running_record)
 
         # ── Workspace preparation (once per task run) ──────────────────────────
-        workspace_mod.prepare(project_root, task)
+        click.echo("Preparing workspace...")
+        workspace_mod.prepare(project_root, task, yes=yes)
 
         # ── Build prompt (once; reused for all retries) ────────────────────────
         prompt = build_prompt(project_root)
@@ -154,6 +157,7 @@ def run_task(
         emitter.subscribe(_on_agent_event)
 
         # ── Agent retry loop ───────────────────────────────────────────────────
+        click.echo(f"Invoking agent for task '{task.id}'...")
         retries_left = config.max_retries
 
         while True:
@@ -227,7 +231,11 @@ def run_task(
                 f"Inspect and resolve manually.\nDetails: {msg}"
             ) from exc
 
-        click.echo(f"Task '{task.id}' completed successfully.")
+        elapsed = round(
+            (datetime.now(timezone.utc) - datetime.fromisoformat(running_record.start_time))
+            .total_seconds()
+        )
+        click.echo(f"Task '{task.id}' completed in {elapsed}s.")
 
     finally:
         if lock_acquired:
