@@ -95,10 +95,16 @@ def _execute_task(
     config: object,
     tasks_to_skip: list[Task] | None = None,
     yes: bool = False,
+    skip_build: bool = False,
 ) -> None:
     """Run a single task, translating known errors to user-facing messages."""
     try:
-        run_task(root, task, store, config, tasks_to_skip=tasks_to_skip, yes=yes)  # type: ignore[arg-type]
+        run_task(  # type: ignore[arg-type]
+            root, task, store, config,
+            tasks_to_skip=tasks_to_skip,
+            yes=yes,
+            skip_build=skip_build,
+        )
     except (PreflightError, WorkspaceError, TaskRunError) as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
@@ -111,6 +117,7 @@ def _run_explicit_task(
     store: ResultsStore,
     config: object,
     yes: bool = False,
+    skip_build: bool = False,
 ) -> None:
     """
     Handle `agent-build run <task-id>` (explicit task targeting).
@@ -190,7 +197,8 @@ def _run_explicit_task(
             tasks_to_skip.append(task)
 
     # 6. Execute the target task (skipped records written inside after lock)
-    _execute_task(root, target, store, config, tasks_to_skip=tasks_to_skip, yes=yes)
+    _execute_task(root, target, store, config, tasks_to_skip=tasks_to_skip, yes=yes,
+                  skip_build=skip_build)
 
 
 @cli.command()
@@ -201,7 +209,16 @@ def _run_explicit_task(
     default=False,
     help="Auto-confirm all prompts (useful for scripting).",
 )
-def run(task_id: str | None, yes: bool) -> None:
+@click.option(
+    "--skip-build",
+    is_flag=True,
+    default=False,
+    help=(
+        "Skip agent invocation; run verifications and commit if they pass. "
+        "Useful after manually fixing src/."
+    ),
+)
+def run(task_id: str | None, yes: bool, skip_build: bool) -> None:
     """Run the next task (or a specific task by ID)."""
     root = _find_project_root()
 
@@ -220,7 +237,8 @@ def run(task_id: str | None, yes: bool) -> None:
     store = ResultsStore(root / "results")
 
     if task_id is not None:
-        _run_explicit_task(root, task_id, tasks, store, config, yes=yes)
+        _run_explicit_task(root, task_id, tasks, store, config, yes=yes,
+                           skip_build=skip_build)
         return
 
     # Normal resume flow
@@ -245,4 +263,4 @@ def run(task_id: str | None, yes: bool) -> None:
             sys.exit(0)
 
     assert resume.task is not None
-    _execute_task(root, resume.task, store, config, yes=yes)
+    _execute_task(root, resume.task, store, config, yes=yes, skip_build=skip_build)

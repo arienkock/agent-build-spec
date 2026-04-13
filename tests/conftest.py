@@ -84,19 +84,52 @@ def make_agent_config(
     project_root: Path,
     exit_code: int = 0,
     create_file: str | None = None,
+    verification_fail: bool = False,
+    fail_reason: str = "Test failure",
+    verification_exit_code: int = 0,
+    max_retries: int = 0,
+    verification_timeout_seconds: int = 10,
+    fail_if_stdin_contains: str | None = None,
+    invocation_count_file: str | None = None,
+    verification_no_output: bool = False,
+    verification_raw_output: str | None = None,
+    verification_create_file: str | None = None,
 ) -> None:
     """
     Write agent-build.config.json pointing at fake_agent.py.
-    The fake agent reads stdin, optionally creates a file, and exits with exit_code.
-    create_file is relative to src/ (the agent's cwd).
+
+    The fake agent detects whether it's being called as a verification agent
+    (stdin contains the sentinel "Respond with a JSON object on the last line")
+    and responds accordingly.
+
+    Agent mode: reads stdin, optionally creates a file, exits with exit_code.
+    Verification mode: outputs PASS/FAIL JSON based on verification_* flags.
     """
+    import shlex
     cmd = f"{sys.executable} {FAKE_AGENT} --exit-code {exit_code} --model {{model}}"
     if create_file:
-        cmd += f" --create-file {create_file}"
+        cmd += f" --create-file {shlex.quote(create_file)}"
+    if verification_fail:
+        cmd += " --verification-fail"
+    if fail_reason != "Test failure":
+        cmd += f" --fail-reason {shlex.quote(fail_reason)}"
+    if verification_exit_code != 0:
+        cmd += f" --verification-exit-code {verification_exit_code}"
+    if fail_if_stdin_contains is not None:
+        cmd += f" --fail-if-stdin-contains {shlex.quote(fail_if_stdin_contains)}"
+    if invocation_count_file is not None:
+        cmd += f" --invocation-count-file {shlex.quote(invocation_count_file)}"
+    if verification_no_output:
+        cmd += " --verification-no-output"
+    if verification_raw_output is not None:
+        cmd += f" --verification-raw-output {shlex.quote(verification_raw_output)}"
+    if verification_create_file is not None:
+        cmd += f" --verification-create-file {shlex.quote(verification_create_file)}"
     cfg = {
         "agent_command": cmd,
         "agent_timeout_seconds": 10,
-        "max_retries": 0,
+        "verification_timeout_seconds": verification_timeout_seconds,
+        "max_retries": max_retries,
     }
     (project_root / "agent-build.config.json").write_text(json.dumps(cfg))
 
