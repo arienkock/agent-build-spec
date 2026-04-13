@@ -68,7 +68,15 @@ def _run_single_verification(
     verification_id = verification_file.stem
     src_dir = project_root / "src"
 
-    file_content = verification_file.read_text(encoding="utf-8")
+    try:
+        file_content = verification_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        return VerificationResult(
+            status=VerificationStatus.FAIL,
+            reasoning=f"Verification file could not be read: {exc}",
+            verification_id=verification_id,
+        )
+
     prompt = _build_verification_prompt(file_content)
 
     process: Optional[subprocess.Popen[str]] = None
@@ -149,13 +157,13 @@ def _run_single_verification(
         if raw_status == "PASS":
             return VerificationResult(
                 status=VerificationStatus.PASS,
-                reasoning=data.get("reasoning", ""),
+                reasoning=data.get("reasoning") or "",
                 verification_id=verification_id,
             )
         elif raw_status == "FAIL":
             return VerificationResult(
                 status=VerificationStatus.FAIL,
-                reasoning=data.get("reasoning", ""),
+                reasoning=data.get("reasoning") or "",
                 verification_id=verification_id,
             )
         else:

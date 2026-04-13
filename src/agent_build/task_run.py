@@ -103,6 +103,13 @@ def _build_verification_retry_prompt(
     )
 
 
+def _emit_verification_failure(verification_id: str, reasoning: str) -> None:
+    """Print a clear, actionable message when a verification fails."""
+    click.echo(f"Verification '{verification_id}' failed.")
+    if reasoning:
+        click.echo(f"  Reasoning: {reasoning}")
+
+
 def _on_agent_event(event: AgentEvent) -> None:
     """Default event listener: print agent output to stdout."""
     if isinstance(event, AgentOutput):
@@ -238,19 +245,17 @@ def run_task(
 
             # Verification failed — retry if attempts remain
             assert failing is not None
+            _emit_verification_failure(failing.verification_id, failing.reasoning)
             if retries_left <= 0:
                 _write_failed_record(
                     store, task.id, base_commit, running_record.start_time
                 )
                 raise TaskRunError(
                     f"Verification '{failing.verification_id}' failed and the "
-                    "retry limit is exhausted."
+                    f"retry limit is exhausted.\nReasoning: {failing.reasoning}"
                 )
             retries_left -= 1
-            click.echo(
-                f"Verification '{failing.verification_id}' failed. "
-                f"Retrying ({retries_left} retries remaining)..."
-            )
+            click.echo(f"Retrying ({retries_left} retries remaining)...")
             # Rebuild retry prompt from original_prompt so only the most recent
             # failure reasoning is appended (never accumulated).
             current_prompt = _build_verification_retry_prompt(

@@ -14,7 +14,12 @@ from pathlib import Path
 import pytest
 
 from agent_build.config import Config
-from agent_build.verification import VerificationResult, VerificationStatus, run_verifications
+from agent_build.verification import (
+    VerificationResult,
+    VerificationStatus,
+    _run_single_verification,
+    run_verifications,
+)
 
 FAKE_AGENT = Path(__file__).parent / "fake_agent.py"
 
@@ -320,3 +325,45 @@ def test_verification_cwd_is_src(tmp_path):
 
     # The file should have been created relative to src/
     assert (project_root / "src" / marker).exists()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Edge case tests (partial-state / mid-run failures)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_verification_file_deleted_mid_run(tmp_path):
+    """
+    If a verification file is deleted between directory listing and reading
+    (simulated by passing a path to a non-existent file), run_verifications
+    must return FAIL with a clear message instead of raising FileNotFoundError.
+    """
+    project_root = _setup_project(tmp_path)
+    config = _make_config(tmp_path)
+
+    # Point directly at a file that doesn't exist — simulates the race condition
+    # where the file existed during iterdir() but was removed before read_text().
+    missing_file = project_root / "src" / ".agent-context" / "verifications" / "gone.md"
+
+    result = _run_single_verification(missing_file, project_root, config)
+
+    assert result.status == VerificationStatus.FAIL
+    assert "could not be read" in result.reasoning.lower()
+
+
+def test_null_reasoning_coerced_to_empty_string(tmp_path):
+    """
+    When the verification JSON has "reasoning": null, the VerificationResult
+    reasoning must be an empty string, not None (which would print 'None').
+    """
+    project_root = _setup_project(tmp_path)
+    vdir = project_root / "src" / ".agent-context" / "verifications"
+    _add_verification(vdir, "001-check.md")
+    # Return JSON with explicit null reasoning
+    null_reasoning_json = json.dumps({"status": "FAIL", "reasoning": None})
+    config = _make_config(tmp_path, verification_raw_output=null_reasoning_json)
+
+    status, result = run_verifications(project_root, config)
+
+    assert status == VerificationStatus.FAIL
+    assert result is not None
+    assert result.reasoning == ""  # null coerced to empty string, not "None"

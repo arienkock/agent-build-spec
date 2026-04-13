@@ -298,3 +298,69 @@ def test_skip_build_precommitted_fix(project_root):
         cwd=project_root, capture_output=True, text=True, check=True,
     )
     assert results_diff.stdout.strip() != "", "Expected results/ changes in the commit"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Edge case / partial-state tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_verification_reasoning_shown_on_failure(project_root):
+    """
+    When verification fails, the reasoning from the agent must appear in
+    the CLI output so the developer knows what to fix.
+    """
+    make_agent_config(
+        project_root,
+        create_file="output.txt",
+        verification_fail=True,
+        fail_reason="output.txt must contain exactly 'hello'",
+        max_retries=0,
+    )
+
+    result = run_cli(project_root, "run", "--yes")
+
+    assert result.returncode == 1
+    # Reasoning must appear in stdout (where progress messages go)
+    assert "output.txt must contain exactly 'hello'" in result.stdout
+
+
+def test_verification_reasoning_shown_on_retry(project_root):
+    """
+    When verification fails but a retry remains, the reasoning must appear
+    before the retry message so the developer can see what went wrong.
+    """
+    make_agent_config(
+        project_root,
+        create_file="output.txt",
+        verification_fail=True,
+        fail_reason="file content incorrect",
+        max_retries=1,
+    )
+
+    result = run_cli(project_root, "run", "--yes")
+
+    # Run will eventually fail (max_retries=1, always FAIL), but reasoning
+    # must appear at least once before the retry message.
+    assert "file content incorrect" in result.stdout
+    assert "Retrying" in result.stdout
+
+
+def test_verification_reasoning_in_final_error(project_root):
+    """
+    When retries are exhausted, the final error message must include
+    the reasoning so the developer can diagnose without hunting through logs.
+    """
+    make_agent_config(
+        project_root,
+        create_file="output.txt",
+        verification_fail=True,
+        fail_reason="expected output missing",
+        max_retries=0,
+    )
+
+    result = run_cli(project_root, "run", "--yes")
+
+    assert result.returncode == 1
+    # Both the verification ID and the reasoning must appear in stderr
+    assert "retry limit is exhausted" in result.stderr
+    assert "expected output missing" in result.stderr
