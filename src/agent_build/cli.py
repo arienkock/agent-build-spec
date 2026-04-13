@@ -17,6 +17,14 @@ from .workspace import WorkspaceError
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 
+_STATUS_STYLE: dict[str, dict] = {
+    "completed": {"fg": "bright_green"},
+    "failed":    {"fg": "red"},
+    "running":   {"fg": "yellow"},
+    "skipped":   {"fg": "white", "dim": True},
+    "—":         {"fg": "white", "dim": True},
+}
+
 
 def _find_project_root() -> Path:
     """Use the current working directory as the project root."""
@@ -30,7 +38,7 @@ def cli() -> None:
 
 @cli.command()
 def status() -> None:
-    """Show the status of all tasks."""
+    """Show the status of all tasks and what will run next."""
     root = _find_project_root()
 
     try:
@@ -59,7 +67,25 @@ def status() -> None:
     click.echo(header)
     click.echo("-" * len(header))
     for task_id, status_val in rows:
-        click.echo(f"{task_id:<{id_width}}  {status_val}")
+        styled = click.style(status_val, **_STATUS_STYLE.get(status_val, {}))
+        click.echo(f"{task_id:<{id_width}}  {styled}")
+
+    # Footer: show what would run next
+    resume = determine_resume_point(tasks, store)
+    click.echo("")
+    if resume.kind == ResumePointKind.READY:
+        assert resume.task is not None
+        click.echo(f"Next: run task '{resume.task.id}'")
+    elif resume.kind == ResumePointKind.NEEDS_CONFIRMATION:
+        assert resume.task is not None
+        click.echo(
+            f"Next: re-run task '{resume.task.id}' "
+            "(status: running — may be interrupted)"
+        )
+    elif resume.kind == ResumePointKind.COMPLETE:
+        click.echo("All tasks complete.")
+    elif resume.kind == ResumePointKind.ERROR:
+        click.echo(f"Error: {resume.message}", err=True)
 
 
 def _execute_task(
@@ -68,10 +94,11 @@ def _execute_task(
     store: ResultsStore,
     config: object,
     tasks_to_skip: list[Task] | None = None,
+    yes: bool = False,
 ) -> None:
     """Run a single task, translating known errors to user-facing messages."""
     try:
-        run_task(root, task, store, config, tasks_to_skip=tasks_to_skip)  # type: ignore[arg-type]
+        run_task(root, task, store, config, tasks_to_skip=tasks_to_skip, yes=yes)  # type: ignore[arg-type]
     except (PreflightError, WorkspaceError, TaskRunError) as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
@@ -83,6 +110,7 @@ def _run_explicit_task(
     tasks: list[Task],
     store: ResultsStore,
     config: object,
+    yes: bool = False,
 ) -> None:
     """
     Handle `agent-build run <task-id>` (explicit task targeting).
@@ -140,11 +168,11 @@ def _run_explicit_task(
             f"Task '{target.id}' has status 'running'. "
             "This may indicate a concurrent or interrupted run."
         )
-        if not click.confirm("Re-run this task from the beginning?"):
+        if not yes and not click.confirm("Re-run this task from the beginning?"):
             click.echo("Aborted.")
             sys.exit(0)
     else:
-        if not click.confirm(f"Run task '{target.id}'?"):
+        if not yes and not click.confirm(f"Run task '{target.id}'?"):
             click.echo("Aborted.")
             sys.exit(0)
 
@@ -162,12 +190,18 @@ def _run_explicit_task(
             tasks_to_skip.append(task)
 
     # 6. Execute the target task (skipped records written inside after lock)
-    _execute_task(root, target, store, config, tasks_to_skip=tasks_to_skip)
+    _execute_task(root, target, store, config, tasks_to_skip=tasks_to_skip, yes=yes)
 
 
 @cli.command()
 @click.argument("task_id", required=False)
-def run(task_id: str | None) -> None:
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    default=False,
+    help="Auto-confirm all prompts (useful for scripting).",
+)
+def run(task_id: str | None, yes: bool) -> None:
     """Run the next task (or a specific task by ID)."""
     root = _find_project_root()
 
@@ -186,7 +220,7 @@ def run(task_id: str | None) -> None:
     store = ResultsStore(root / "results")
 
     if task_id is not None:
-        _run_explicit_task(root, task_id, tasks, store, config)
+        _run_explicit_task(root, task_id, tasks, store, config, yes=yes)
         return
 
     # Normal resume flow
@@ -206,9 +240,9 @@ def run(task_id: str | None) -> None:
             f"Task '{resume.task.id}' has status 'running'. "
             "This may indicate a concurrent or interrupted run."
         )
-        if not click.confirm("Re-run this task from the beginning?"):
+        if not yes and not click.confirm("Re-run this task from the beginning?"):
             click.echo("Aborted.")
             sys.exit(0)
 
     assert resume.task is not None
-    _execute_task(root, resume.task, store, config)
+    _execute_task(root, resume.task, store, config, yes=yes)

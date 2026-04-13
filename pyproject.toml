@@ -13,5 +13,8 @@ dependencies = [
 [project.scripts]
 agent-build = "agent_build.cli:cli"
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [tool.setuptools.packages.find]
 where = ["src"]

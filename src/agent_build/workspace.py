@@ -48,7 +48,7 @@ def _ensure_gitignore_entry(src_dir: Path) -> None:
         fh.write(".agent-context\n")
 
 
-def prepare(project_root: Path, task: Task) -> None:
+def prepare(project_root: Path, task: Task, yes: bool = False) -> None:
     """
     Prepare the agent workspace for *task* inside src/.agent-context/.
 
@@ -68,7 +68,9 @@ def prepare(project_root: Path, task: Task) -> None:
             "Warning: src/.agent-context/ already exists. "
             "A previous run likely left it behind."
         )
-        if not click.confirm("Delete it and recopy?"):
+        if yes:
+            click.echo("Removing existing .agent-context/ (--yes).")
+        elif not click.confirm("Delete it and recopy?"):
             raise WorkspaceError(
                 "Aborted: existing src/.agent-context/ was not overwritten."
             )

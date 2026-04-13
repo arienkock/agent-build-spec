@@ -41,7 +41,7 @@ def check_required_dirs(project_root: Path) -> None:
             raise PreflightError(f"Required directory '{name}/' does not exist.")
 
 
-def check_clean_tree(project_root: Path) -> None:
+def check_clean_tree(project_root: Path, yes: bool = False) -> None:
     """Check working tree; prompt user if dirty. Raise PreflightError if declined."""
     result = subprocess.run(
         ["git", "status", "--porcelain"],
@@ -52,7 +52,9 @@ def check_clean_tree(project_root: Path) -> None:
     if result.stdout.strip():
         click.echo("Warning: the working tree has uncommitted or untracked changes:")
         click.echo(result.stdout.rstrip())
-        if not click.confirm("Proceed anyway?"):
+        if yes:
+            click.echo("Proceeding with dirty working tree (--yes).")
+        elif not click.confirm("Proceed anyway?"):
             raise PreflightError("Aborted: dirty working tree.")
 
 
@@ -202,7 +204,7 @@ def release_lock(lock_path: Path) -> None:
         pass
 
 
-def run(project_root: Path) -> str:
+def run(project_root: Path, yes: bool = False) -> str:
     """
     Run all preflight checks in order. Returns the base commit hash.
     The caller MUST call release_lock(project_root / '.agent-build.lock')
@@ -216,7 +218,7 @@ def run(project_root: Path) -> str:
     # 2. Verify git repo, required dirs, clean working tree
     check_git_repo(project_root)
     check_required_dirs(project_root)
-    check_clean_tree(project_root)
+    check_clean_tree(project_root, yes=yes)
 
     # 3. Ensure there is at least one commit (rollback requires a base)
     base_commit = get_head_commit(project_root)
