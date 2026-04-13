@@ -171,6 +171,7 @@ Complete the task. When you are done, stop. Verifications will be run automatica
 - Implementation: boolean `skip_build` threaded from `cli.py` → `run_task()` → wraps the agent retry loop in `if not skip_build:`.
 - `--skip-build` implies the user accepts the current state of `src/`; it does not interact with `--yes` (confirmation prompts are separate).
 - Test cases: `--skip-build` on a fresh task → skips agent, runs verifications, writes completed record; `--skip-build` with failing verification → retry loop activates normally; `--skip-build` + `--yes` → no prompts at all.
+- **Pre-committed fix scenario:** the user may have already committed their manual `src/` fix before running `--skip-build`, leaving the working tree clean with no new `src/` changes to stage. This is safe by design: `_stage_and_commit` stages both `src/` and `results/`, and the COMPLETED record in `results/` is always freshly written at this point, so `git diff --cached` will always detect staged changes from `results/` even when `src/` is unchanged. No additional logic is required. Test case: inject a `failed` record, commit a manual fix to `src/`, run `--skip-build` — tool must succeed, commit must exist, and the commit diff must include only `results/` changes.
 
 ---
 
@@ -242,3 +243,4 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 - **`--skip-build` happy path:** no agent invoked, verifications run, completed record written, commit created
 - **`--skip-build` with failing verification:** verification FAIL triggers retry loop; agent still not invoked on retry; exhausted retries → failed record
 - **`--skip-build` + `--yes`:** no confirmation prompts, proceeds directly to verifications
+- **`--skip-build` with pre-committed fix:** inject `failed` record; commit a manual file change to `src/`; run `--skip-build` → tool succeeds, COMPLETED record written, new commit created whose diff contains only `results/` (no `src/` changes); no "nothing to commit" error
