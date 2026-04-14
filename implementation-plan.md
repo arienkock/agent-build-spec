@@ -20,10 +20,81 @@ agent_build/
   verification.py  — invoke verification agent, parse JSON       [Phase 4]
   task_run.py      — orchestrate full cycle                      [Phase 2+]
   rollback.py      — restore src/ to base commit                 [Phase 5]
-  cli.py           — entry point: commands, output rendering
+  cli.py           — entry point: commands, output rendering (init, status, run)
 ```
 
 `types.py`, `project.py`, `results.py`, `resume.py` are written in Phase 1 and remain stable. Each phase extends `task_run.py` and `cli.py`.
+
+---
+
+## Phase 0 — Project Initialization
+
+**CLI:** `agent-build init` (creates a new build spec project).
+
+### `agent-build init` Command
+
+Creates a complete, spec-compliant project structure. Optionally initializes a git repository if none exists.
+
+**Directory structure created:**
+```
+<project-root>/
+├── tasks/              # empty; ready for task subdirectories
+├── verifications/      # empty; ready for verification files
+├── global/             # empty; optional GLOBAL.md created if --global flag
+├── src/                # empty; agent workspace
+│   └── .gitignore      # created with sensible defaults (see below)
+├── results/            # empty; created on first task run
+└── agent-build.config.json  # default configuration
+```
+
+**`.gitignore` defaults (appended to existing or created):**
+```
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+node_modules/
+.DS_Store
+*.swp
+*.swo
+```
+
+**`agent-build.config.json` defaults:**
+```json
+{
+  "agent_command": "claude --print --dangerously-skip-permissions --model {model}",
+  "model": "claude-sonnet-4-6",
+  "agent_timeout_seconds": 600,
+  "verification_timeout_seconds": 120,
+  "max_retries": 3
+}
+```
+
+**Behavior:**
+- Refuses to run if any of the following already exist: `tasks/`, `src/`, `verifications/`, `global/`, `agent-build.config.json`
+- With `--force`: removes and recreates (destructive; requires `--yes` confirmation)
+- With `--git` (default if no git repo exists): runs `git init` before creating structure
+- With `--global`: creates `global/GLOBAL.md` with template header:
+  ```markdown
+  # Global Instructions
+
+  Add instructions here that apply to all tasks. These will be provided to the
+  agent before each task's specific instructions.
+  ```
+- `--template <name>`: loads a template from a built-in registry or local path to seed initial tasks/verifications. Default templates:
+  - `minimal` (default): empty structure
+  - `python`: includes `001-setup/`, `002-impl/` tasks with sensible defaults for Python projects
+- `agent_build.config.json` is always created with full defaults; the `{model}` placeholder is validated at config load time, not init time.
+
+**Extensibility:**
+- Templates are discovered from: (1) built-in registry, (2) `<project-root>/.agent-build/templates/<name>/`, (3) paths passed via `--template`
+- A template is a directory containing any of: `tasks/`, `verifications/`, `global/`, `src/`, `agent-build.config.json`
+- Files from the template are copied into the project root; existing files are skipped unless `--force` is used
+- Users may extend the tool by placing custom templates in `.agent-build/templates/` within any project root
+
+**Exit codes:** 0 on success, 1 on error (existing files without `--force`, git init failure, invalid template, etc.)
 
 ---
 
@@ -218,6 +289,7 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 | `config.py` | Missing file → all defaults; zero/negative timeout → error; extra fields ignored; `{0}` in command → error; `{unknown}` in command → error; `{model}` only → valid; `{model}` substituted but remaining `{something}` present → validation error; empty `agent_command` string → validation error; argv split for `shell=False` |
 | `results.py` | Malformed JSON → `ResultsStoreError`; valid JSON missing `status` field → `ResultsStoreError`; non-existent → `None`; archive numbering with gaps; atomic write; consistency detects broken chain; `write()` creates dir; skipped serializes only `status` + `previousResults`; camelCase keys |
 | `rollback.py` | No records → abort before any mutation (guard #0); missing `previousResults` file → abort before changes; null chain → delete only; skipped → abort; missing base commit → abort; guard order enforced; archive moved not copied; no-change → clear error, no empty commit; lock already held → abort before mutation |
+| `init.py` / `cli.py` (init) | creates expected structure; refuses if dirs exist (no --force); --force removes and recreates; --force requires --yes; --git initializes repo; --global creates GLOBAL.md; --template loads built-in template; --template with local path copies files; template files skip existing unless --force; invalid template → error; empty project root → success; .gitignore appended if exists, created if absent; .gitignore contains expected entries; agent-build.config.json created with all defaults; exit code 0 on success, 1 on error |
 
 ### Integration Tests
 
@@ -244,3 +316,4 @@ Extends `agent.py`, `cli.py`. Stream token/cost metrics; periodic diff of `src/`
 - **`--skip-build` with failing verification:** verification FAIL triggers retry loop; agent still not invoked on retry; exhausted retries → failed record
 - **`--skip-build` + `--yes`:** no confirmation prompts, proceeds directly to verifications
 - **`--skip-build` with pre-committed fix:** inject `failed` record; commit a manual file change to `src/`; run `--skip-build` → tool succeeds, COMPLETED record written, new commit created whose diff contains only `results/` (no `src/` changes); no "nothing to commit" error
+- **`agent-build init`:** creates all required directories and files; refuses if project already initialized; `--force` with `--yes` allows reinit; `--git` initializes repo; `--global` creates GLOBAL.md; `--template minimal` creates empty structure; `--template python` seeds Python-appropriate tasks; custom template from local path works; template skips existing files; invalid template path → clear error; .gitignore entries not duplicated on reinit; config file has all expected keys
