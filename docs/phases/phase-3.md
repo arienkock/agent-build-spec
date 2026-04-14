@@ -19,7 +19,7 @@ Verification checks that will be run against your output are defined as files in
 Complete the task. When you are done, stop. Verifications will be run automatically.
 ```
 
-- Subprocess: no TTY, captured stdio, `cwd=<root>/src/`, prompt via stdin
+- Subprocess: no TTY, captured stdio, `cwd=<root>/src/`, prompt via argv (substituting `{prompt}` placeholder)
 - Events: `AgentStarted`, `AgentOutput(chunk)`, `AgentCompleted(exit_code)`, `AgentTimedOut`
 - Timeout → retry with original prompt (shared `max_retries` counter); non-zero exit → fail, no retry
 - `OSError` on launch → `failed` record, no retry, no propagation
@@ -29,7 +29,7 @@ Complete the task. When you are done, stop. Verifications will be run automatica
 
 | Module | Key cases |
 |---|---|
-| `agent.py` | Prompt via stdin not argv; `cwd=src/`; SIGINT kills then `wait()` reaps; SIGTERM handler installed → kills + `wait()` + raises `SystemExit`; timeout → kill + `wait()` + event; resume preserves `base_commit`; `OSError` → failed, no retry |
+| `agent.py` | Prompt via argv not stdin; `cwd=src/`; SIGINT kills then `wait()` reaps; SIGTERM handler installed → kills + `wait()` + raises `SystemExit`; timeout → kill + `wait()` + event; resume preserves `base_commit`; `OSError` → failed, no retry |
 
 ### Integration Tests
 

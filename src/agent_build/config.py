@@ -10,7 +10,7 @@ from typing import Optional
 CONFIG_FILENAME = "agent-build.config.json"
 
 DEFAULTS: dict = {
-    "agent_command": "claude --print --dangerously-skip-permissions --model {model}",
+    "agent_command": "claude --print --dangerously-skip-permissions --model {model} {prompt}",
     "model": "claude-sonnet-4-6",
     "agent_timeout_seconds": 600,
     "verification_timeout_seconds": 120,
@@ -40,15 +40,15 @@ def _validate_command(command: str, model: str) -> None:
     if not command.strip():
         raise ConfigError("agent_command must not be empty")
 
-    # Substitute {model} and check for leftover format fields
-    substituted = command.replace("{model}", model)
+    # Substitute {model} and {prompt} and check for leftover format fields
+    substituted = command.replace("{model}", model).replace("{prompt}", "")
 
     # Detect any remaining {…} placeholders
     remaining = re.findall(r"\{[^}]*\}", substituted)
     if remaining:
         raise ConfigError(
             f"agent_command contains unsupported placeholder(s): {', '.join(remaining)}. "
-            "Only {model} is allowed."
+            "Only {model} and {prompt} are allowed."
         )
 
 
@@ -70,9 +70,13 @@ def load_config(project_root: Path) -> Config:
 
     agent_command = str(raw.get("agent_command", DEFAULTS["agent_command"]))
     model = str(raw.get("model", DEFAULTS["model"]))
-    agent_timeout = int(raw.get("agent_timeout_seconds", DEFAULTS["agent_timeout_seconds"]))
+    agent_timeout = int(
+        raw.get("agent_timeout_seconds", DEFAULTS["agent_timeout_seconds"])
+    )
     verification_timeout = int(
-        raw.get("verification_timeout_seconds", DEFAULTS["verification_timeout_seconds"])
+        raw.get(
+            "verification_timeout_seconds", DEFAULTS["verification_timeout_seconds"]
+        )
     )
     max_retries = int(raw.get("max_retries", DEFAULTS["max_retries"]))
 

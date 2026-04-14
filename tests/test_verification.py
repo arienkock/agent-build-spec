@@ -5,6 +5,7 @@ These tests call run_verifications() directly (not via CLI) with a real Config
 pointing at fake_agent.py.  The fake_agent detects verification calls by
 checking stdin for the sentinel string.
 """
+
 from __future__ import annotations
 
 import json
@@ -40,7 +41,8 @@ def _make_config(
     verification_timeout_seconds: int = 10,
 ) -> Config:
     import shlex
-    cmd = f"{sys.executable} {FAKE_AGENT} --exit-code {exit_code} --model {{model}}"
+
+    cmd = f"{sys.executable} {FAKE_AGENT} --exit-code {exit_code} --model {{model}} {{prompt}}"
     if verification_fail:
         cmd += " --verification-fail"
     if fail_reason != "Test failure":
@@ -84,7 +86,9 @@ def _setup_project(tmp_path: Path) -> Path:
     return project_root
 
 
-def _add_verification(verifications_dir: Path, name: str, content: str = "# Check\n") -> Path:
+def _add_verification(
+    verifications_dir: Path, name: str, content: str = "# Check\n"
+) -> Path:
     vf = verifications_dir / name
     vf.write_text(content)
     return vf
@@ -93,6 +97,7 @@ def _add_verification(verifications_dir: Path, name: str, content: str = "# Chec
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_pass_response(tmp_path):
     """Fake agent returns PASS JSON → VerificationStatus.PASS."""
@@ -115,7 +120,10 @@ def test_last_nonempty_line_parsed(tmp_path):
 
     # Build a fake agent that outputs extra lines followed by the JSON
     import shlex
-    raw_output = "some preamble\nmore text\n" + json.dumps({"status": "PASS", "reasoning": "ok"})
+
+    raw_output = "some preamble\nmore text\n" + json.dumps(
+        {"status": "PASS", "reasoning": "ok"}
+    )
     config = _make_config(tmp_path, verification_raw_output=raw_output)
 
     # raw_output ends with JSON, but _make_config uses --verification-raw-output
@@ -176,7 +184,9 @@ def test_timeout_fail(tmp_path):
     vdir = project_root / "src" / ".agent-context" / "verifications"
     _add_verification(vdir, "001-check.md")
     # Sleep longer than the 1-second timeout
-    config = _make_config(tmp_path, verification_sleep=3, verification_timeout_seconds=1)
+    config = _make_config(
+        tmp_path, verification_sleep=3, verification_timeout_seconds=1
+    )
 
     status, result = run_verifications(project_root, config)
 
@@ -193,7 +203,7 @@ def test_oserror_fail(tmp_path):
 
     # Use a bogus command that cannot be launched
     bad_config = Config(
-        agent_command="/nonexistent/binary/agent --model {model}",
+        agent_command="/nonexistent/binary/agent --model {model} {prompt}",
         model="test",
         agent_timeout_seconds=10,
         verification_timeout_seconds=10,
@@ -224,6 +234,7 @@ def test_no_verifications_dir(tmp_path):
     project_root = _setup_project(tmp_path)
     # Remove the verifications dir
     import shutil
+
     shutil.rmtree(project_root / "src" / ".agent-context" / "verifications")
     config = _make_config(tmp_path)
 
@@ -271,7 +282,9 @@ def test_extra_json_fields_pass(tmp_path):
     vdir = project_root / "src" / ".agent-context" / "verifications"
     _add_verification(vdir, "001-check.md")
     # Output JSON with extra fields
-    raw_output = json.dumps({"status": "PASS", "reasoning": "ok", "extra": "ignored", "score": 99})
+    raw_output = json.dumps(
+        {"status": "PASS", "reasoning": "ok", "extra": "ignored", "score": 99}
+    )
     config = _make_config(tmp_path, verification_raw_output=raw_output)
 
     status, result = run_verifications(project_root, config)
@@ -304,7 +317,9 @@ def test_fail_result_contains_reasoning(tmp_path):
     project_root = _setup_project(tmp_path)
     vdir = project_root / "src" / ".agent-context" / "verifications"
     _add_verification(vdir, "001-check.md")
-    config = _make_config(tmp_path, verification_fail=True, fail_reason="Missing required field")
+    config = _make_config(
+        tmp_path, verification_fail=True, fail_reason="Missing required field"
+    )
 
     status, result = run_verifications(project_root, config)
 
@@ -330,6 +345,7 @@ def test_verification_cwd_is_src(tmp_path):
 # ─────────────────────────────────────────────────────────────────────────────
 # Edge case tests (partial-state / mid-run failures)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_verification_file_deleted_mid_run(tmp_path):
     """

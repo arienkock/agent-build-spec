@@ -8,14 +8,20 @@ from pathlib import Path
 from typing import Optional
 
 from .config import Config
-from .events import AgentCompleted, AgentOutput, AgentStarted, AgentTimedOut, EventEmitter
+from .events import (
+    AgentCompleted,
+    AgentOutput,
+    AgentStarted,
+    AgentTimedOut,
+    EventEmitter,
+)
 
 
 class AgentOutcome(str, Enum):
-    COMPLETED = "completed"       # exited 0
-    FAILED = "failed"             # exited non-zero
-    TIMED_OUT = "timed_out"       # killed after timeout
-    LAUNCH_ERROR = "launch_error" # OSError on Popen
+    COMPLETED = "completed"  # exited 0
+    FAILED = "failed"  # exited non-zero
+    TIMED_OUT = "timed_out"  # killed after timeout
+    LAUNCH_ERROR = "launch_error"  # OSError on Popen
 
 
 @dataclass
@@ -40,21 +46,25 @@ def build_prompt(project_root: Path) -> str:
 
     global_md = project_root / "src" / ".agent-context" / "global" / "GLOBAL.md"
     if global_md.exists():
-        parts.extend([
-            "",
-            "Global instructions that apply to all tasks are in"
-            " `.agent-context/global/GLOBAL.md`.",
-            "Read these before beginning work.",
-        ])
+        parts.extend(
+            [
+                "",
+                "Global instructions that apply to all tasks are in"
+                " `.agent-context/global/GLOBAL.md`.",
+                "Read these before beginning work.",
+            ]
+        )
 
-    parts.extend([
-        "",
-        "Verification checks that will be run against your output are defined as files in",
-        "`.agent-context/verifications/`. You MAY review them to understand what success"
-        " looks like.",
-        "",
-        "Complete the task. When you are done, stop. Verifications will be run automatically.",
-    ])
+    parts.extend(
+        [
+            "",
+            "Verification checks that will be run against your output are defined as files in",
+            "`.agent-context/verifications/`. You MAY review them to understand what success"
+            " looks like.",
+            "",
+            "Complete the task. When you are done, stop. Verifications will be run automatically.",
+        ]
+    )
 
     return "\n".join(parts)
 
@@ -66,10 +76,11 @@ def run_agent(
     emitter: EventEmitter,
 ) -> AgentResult:
     """
-    Launch the agent as a subprocess with the given *prompt* via stdin.
+    Launch the agent as a subprocess with the given *prompt* via argv.
 
     - cwd is set to <project_root>/src/
     - stdout/stderr are captured; no TTY is allocated
+    - stdin is mapped to DEVNULL
     - A SIGTERM handler is installed for the duration of the call; on SIGTERM
       the subprocess is killed, reaped, and SystemExit(1) is raised so that
       enclosing finally blocks (e.g. lock release) execute normally.
@@ -90,10 +101,11 @@ def run_agent(
 
     try:
         try:
+            argv = [arg.replace("{prompt}", prompt) for arg in config.agent_argv]
             process = subprocess.Popen(
-                config.agent_argv,
+                argv,
                 cwd=src_dir,
-                stdin=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -105,7 +117,6 @@ def run_agent(
 
         try:
             stdout, _ = process.communicate(
-                input=prompt,
                 timeout=config.agent_timeout_seconds,
             )
         except subprocess.TimeoutExpired:

@@ -26,6 +26,7 @@ Stateful sequential behavior:
                                  Odd invocations → agent mode behavior, even → can differ.
                                  (Tests use this for "pass on first verification, fail on second")
 """
+
 import argparse
 import json
 import sys
@@ -35,39 +36,80 @@ from pathlib import Path
 parser = argparse.ArgumentParser(description="Fake agent for testing")
 # Agent mode
 parser.add_argument("--model", default="test-model", help="Model name (ignored)")
-parser.add_argument("--exit-code", type=int, default=0, dest="exit_code",
-                    help="Exit code to return in agent mode (default 0)")
-parser.add_argument("--create-file", default=None, dest="create_file",
-                    help="Create a file at this path relative to cwd (src/)")
+parser.add_argument(
+    "--exit-code",
+    type=int,
+    default=0,
+    dest="exit_code",
+    help="Exit code to return in agent mode (default 0)",
+)
+parser.add_argument(
+    "--create-file",
+    default=None,
+    dest="create_file",
+    help="Create a file at this path relative to cwd (src/)",
+)
 # Verification mode
-parser.add_argument("--verification-fail", action="store_true", dest="verification_fail",
-                    help="Output FAIL JSON in verification mode")
-parser.add_argument("--fail-reason", default="Test failure", dest="fail_reason",
-                    help="Reasoning string for FAIL response")
-parser.add_argument("--verification-exit-code", type=int, default=0,
-                    dest="verification_exit_code",
-                    help="Exit code in verification mode (default 0)")
-parser.add_argument("--verification-no-output", action="store_true",
-                    dest="verification_no_output",
-                    help="Print nothing in verification mode")
-parser.add_argument("--verification-raw-output", default=None,
-                    dest="verification_raw_output",
-                    help="Print raw (non-JSON) string in verification mode")
-parser.add_argument("--verification-sleep", type=float, default=0,
-                    dest="verification_sleep",
-                    help="Sleep N seconds before responding in verification mode")
-parser.add_argument("--verification-create-file", default=None,
-                    dest="verification_create_file",
-                    help="Create file relative to cwd in verification mode")
-parser.add_argument("--fail-if-stdin-contains", default=None,
-                    dest="fail_if_stdin_contains",
-                    help="FAIL if this string appears anywhere in stdin")
-parser.add_argument("--invocation-count-file", default=None,
-                    dest="invocation_count_file",
-                    help="Path to counter file for stateful sequential behavior")
+parser.add_argument(
+    "--verification-fail",
+    action="store_true",
+    dest="verification_fail",
+    help="Output FAIL JSON in verification mode",
+)
+parser.add_argument(
+    "--fail-reason",
+    default="Test failure",
+    dest="fail_reason",
+    help="Reasoning string for FAIL response",
+)
+parser.add_argument(
+    "--verification-exit-code",
+    type=int,
+    default=0,
+    dest="verification_exit_code",
+    help="Exit code in verification mode (default 0)",
+)
+parser.add_argument(
+    "--verification-no-output",
+    action="store_true",
+    dest="verification_no_output",
+    help="Print nothing in verification mode",
+)
+parser.add_argument(
+    "--verification-raw-output",
+    default=None,
+    dest="verification_raw_output",
+    help="Print raw (non-JSON) string in verification mode",
+)
+parser.add_argument(
+    "--verification-sleep",
+    type=float,
+    default=0,
+    dest="verification_sleep",
+    help="Sleep N seconds before responding in verification mode",
+)
+parser.add_argument(
+    "--verification-create-file",
+    default=None,
+    dest="verification_create_file",
+    help="Create file relative to cwd in verification mode",
+)
+parser.add_argument(
+    "--fail-if-stdin-contains",
+    default=None,
+    dest="fail_if_stdin_contains",
+    help="FAIL if this string appears anywhere in stdin",
+)
+parser.add_argument(
+    "--invocation-count-file",
+    default=None,
+    dest="invocation_count_file",
+    help="Path to counter file for stateful sequential behavior",
+)
+parser.add_argument("prompt", nargs="?", default="", help="Prompt passed to the agent")
 args = parser.parse_args()
 
-stdin_content = sys.stdin.read()
+stdin_content = args.prompt
 
 # Track invocation count if requested
 invocation_num = 1
