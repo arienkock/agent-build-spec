@@ -35,7 +35,7 @@ def _build_verification_prompt(file_content: str) -> str:
         f"{file_content}\n\n"
         "---\n\n"
         "Task instructions are in `.agent-context/task/TASK.md`.\n\n"
-        'Respond with a JSON object on the last line: '
+        "Respond with a JSON object on the last line: "
         '{ "status": "PASS" | "FAIL", "reasoning": "<brief explanation>" }'
     )
 
@@ -83,10 +83,11 @@ def _run_single_verification(
 
     try:
         try:
+            argv = [arg.replace("{prompt}", prompt) for arg in config.agent_argv]
             process = subprocess.Popen(
-                config.agent_argv,
+                argv,
                 cwd=src_dir,
-                stdin=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -100,7 +101,6 @@ def _run_single_verification(
 
         try:
             stdout, _ = process.communicate(
-                input=prompt,
                 timeout=config.verification_timeout_seconds,
             )
         except subprocess.TimeoutExpired:
@@ -123,8 +123,7 @@ def _run_single_verification(
             return VerificationResult(
                 status=VerificationStatus.FAIL,
                 reasoning=(
-                    f"Verification exited with non-zero exit code "
-                    f"{process.returncode}."
+                    f"Verification exited with non-zero exit code {process.returncode}."
                 ),
                 verification_id=verification_id,
             )

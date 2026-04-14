@@ -38,7 +38,7 @@ node_modules/
 
 ```json
 {
-  "agent_command": "claude --print --dangerously-skip-permissions --model {model}",
+  "agent_command": "claude --print --dangerously-skip-permissions --model {model} {prompt}",
   "model": "claude-sonnet-4-6",
   "agent_timeout_seconds": 600,
   "verification_timeout_seconds": 120,

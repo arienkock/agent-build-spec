@@ -55,7 +55,7 @@ class ResumePointKind(str, Enum):
 
 ```json
 {
-  "agent_command": "claude --print --dangerously-skip-permissions --model {model}",
+  "agent_command": "claude --print --dangerously-skip-permissions --model {model} {prompt}",
   "model": "claude-sonnet-4-6",
   "agent_timeout_seconds": 600,
   "verification_timeout_seconds": 120,
@@ -63,9 +63,9 @@ class ResumePointKind(str, Enum):
 }
 ```
 
-- Prompt passed via stdin, never in `agent_command`. Command split to argv list, `shell=False`.
+- Prompt passed via command line argument by substituting the `{prompt}` placeholder in `agent_command`. Command split to argv list, `shell=False`.
 - Missing fields use defaults; unknown fields ignored; zero/negative timeout → validation error.
-- **`{model}` substitution:** `{0}` (IndexError) or `{unknown}` (KeyError) must be caught at config validation, not runtime. After stripping `{model}`, any remaining `{...}` → validation error.
+- **`{model}` and `{prompt}` substitution:** `{0}` (IndexError) or `{unknown}` (KeyError) must be caught at config validation, not runtime. After stripping `{model}` and `{prompt}`, any remaining `{...}` → validation error.
 
 ## Testing
 
@@ -73,5 +73,5 @@ class ResumePointKind(str, Enum):
 |---|---|
 | `project.py` | Lexicographic sort; missing `TASK.md` → error; empty vs. absent `tasks/` distinct; no leading alphanumeric → WARNING only; `001b-setup-extra`, `01.1-init` accepted |
 | `resume.py` | Discrepancy check first (unknown ID in latest AND archived → ERROR); consistency (archived without latest → ERROR); no records → READY; all completed/skipped → COMPLETE; gap → ERROR; running at last → NEEDS_CONFIRMATION; running not at last → ERROR; failed → READY; single-task project with that task `completed` → COMPLETE; all tasks `skipped` → COMPLETE (skipped treated as success) |
-| `config.py` | Missing file → all defaults; zero/negative timeout → error; extra fields ignored; `{0}` in command → error; `{unknown}` in command → error; `{model}` only → valid; `{model}` substituted but remaining `{something}` present → validation error; empty `agent_command` string → validation error; argv split for `shell=False` |
+| `config.py` | Missing file → all defaults; zero/negative timeout → error; extra fields ignored; `{0}` in command → error; `{unknown}` in command → error; `{model}` and `{prompt}` valid; `{model}` or `{prompt}` substituted but remaining `{something}` present → validation error; empty `agent_command` string → validation error; argv split for `shell=False` |
 | `results.py` | Malformed JSON → `ResultsStoreError`; valid JSON missing `status` field → `ResultsStoreError`; non-existent → `None`; archive numbering with gaps; atomic write; consistency detects broken chain; `write()` creates dir; skipped serializes only `status` + `previousResults`; camelCase keys |

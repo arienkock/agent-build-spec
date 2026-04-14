@@ -4,6 +4,7 @@ Integration tests for Phase 4: Verifications + Retry Loop.
 These tests invoke the real agent-build CLI as a subprocess and verify
 end-to-end behavior including verification retries and --skip-build.
 """
+
 from __future__ import annotations
 
 import json
@@ -18,6 +19,7 @@ from conftest import make_agent_config, run_cli, write_result
 # ─────────────────────────────────────────────────────────────────────────────
 # Verification retry tests
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_verification_pass_after_agent_success(project_root):
     """Agent succeeds and verification passes → completed record, commit."""
@@ -76,6 +78,7 @@ def test_verification_retry_pass_on_retry(project_root):
     wrapper = project_root / "run_verif.py"
     from pathlib import Path as _P
     import sys as _sys
+
     wrapper.write_text(f"""\
 #!/usr/bin/env python3
 import json, sys
@@ -86,7 +89,11 @@ n = int(count_file.read_text()) if count_file.exists() else 0
 n += 1
 count_file.write_text(str(n))
 
-stdin = sys.stdin.read()
+try:
+    stdin = sys.argv[-1]
+except IndexError:
+    stdin = ""
+
 is_verif = "Respond with a JSON object on the last line" in stdin
 
 if is_verif:
@@ -102,7 +109,7 @@ else:
 """)
 
     cfg = {
-        "agent_command": f"{sys.executable} {wrapper} --model {{model}}",
+        "agent_command": f"{sys.executable} {wrapper} --model {{model}} {{prompt}}",
         "agent_timeout_seconds": 10,
         "verification_timeout_seconds": 10,
         "max_retries": 1,
@@ -162,6 +169,7 @@ def test_nonzero_agent_no_verification(project_root):
 # --skip-build tests
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def test_skip_build_happy_path(project_root):
     """--skip-build: agent not invoked, verifications run, completed record written, commit created."""
     # If the agent were invoked, it would create agent_ran.txt.
@@ -184,7 +192,10 @@ def test_skip_build_happy_path(project_root):
     # A new commit must exist
     log = subprocess.run(
         ["git", "log", "--oneline"],
-        cwd=project_root, capture_output=True, text=True, check=True,
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     assert len(log.stdout.strip().splitlines()) >= 2
 
@@ -192,6 +203,7 @@ def test_skip_build_happy_path(project_root):
 def test_skip_build_failing_verification(project_root):
     """--skip-build with a failing verification triggers the retry loop."""
     import sys
+
     # Stateful fake: first verification FAIL, second PASS
     count_file = str(project_root / ".skip-build-count")
     wrapper = project_root / "skip_verif.py"
@@ -205,7 +217,11 @@ n = int(count_file.read_text()) if count_file.exists() else 0
 n += 1
 count_file.write_text(str(n))
 
-stdin = sys.stdin.read()
+try:
+    stdin = sys.argv[-1]
+except IndexError:
+    stdin = ""
+
 is_verif = "Respond with a JSON object on the last line" in stdin
 
 if is_verif:
@@ -218,7 +234,7 @@ else:
 """)
 
     cfg = {
-        "agent_command": f"{sys.executable} {wrapper} --model {{model}}",
+        "agent_command": f"{sys.executable} {wrapper} --model {{model}} {{prompt}}",
         "agent_timeout_seconds": 10,
         "verification_timeout_seconds": 10,
         "max_retries": 1,
@@ -261,17 +277,33 @@ def test_skip_build_precommitted_fix(project_root):
     # src/ change in the tool's commit (it would otherwise count as a src/ diff).
     gitignore = project_root / "src" / ".gitignore"
     gitignore.write_text(".agent-context\n")
-    subprocess.run(["git", "add", "src/.gitignore"],
-                   cwd=project_root, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "add gitignore"],
-                   cwd=project_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "src/.gitignore"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "add gitignore"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
 
     # Simulate user manually fixing src/ and committing
     (project_root / "src" / "manual_fix.txt").write_text("manual fix\n")
-    subprocess.run(["git", "add", "src/manual_fix.txt"],
-                   cwd=project_root, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "manual fix"],
-                   cwd=project_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "src/manual_fix.txt"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "manual fix"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+    )
 
     result = run_cli(project_root, "run", "--skip-build", "--yes")
 
@@ -285,7 +317,10 @@ def test_skip_build_precommitted_fix(project_root):
     # The most recent commit's diff must NOT include src/ changes
     src_diff = subprocess.run(
         ["git", "diff", "HEAD~1", "HEAD", "--", "src/"],
-        cwd=project_root, capture_output=True, text=True, check=True,
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     assert src_diff.stdout.strip() == "", (
         "Expected no src/ changes in the --skip-build commit, "
@@ -295,7 +330,10 @@ def test_skip_build_precommitted_fix(project_root):
     # The results/ must have changed in that commit
     results_diff = subprocess.run(
         ["git", "diff", "HEAD~1", "HEAD", "--", "results/"],
-        cwd=project_root, capture_output=True, text=True, check=True,
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     assert results_diff.stdout.strip() != "", "Expected results/ changes in the commit"
 
@@ -303,6 +341,7 @@ def test_skip_build_precommitted_fix(project_root):
 # ─────────────────────────────────────────────────────────────────────────────
 # Edge case / partial-state tests
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def test_verification_reasoning_shown_on_failure(project_root):
     """
