@@ -12,6 +12,7 @@ from .preflight import PreflightError
 from .project import ProjectError, load_tasks
 from .results import ResultsStore, ResultsStoreError
 from .resume import determine_resume_point
+from .rollback import RollbackError, perform_rollback
 from .task_run import TaskRunError, run_task
 from .types import ResumePointKind, Task, TaskRunStatus
 from .workspace import WorkspaceError
@@ -344,3 +345,21 @@ def run(task_id: str | None, yes: bool, skip_build: bool) -> None:
 
     assert resume.task is not None
     _execute_task(root, resume.task, store, config, yes=yes, skip_build=skip_build)
+
+
+@cli.command()
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Auto-confirm all prompts (useful for scripting).",
+)
+def rollback(yes: bool) -> None:
+    """Rollback the latest task run."""
+    root = _find_project_root()
+    try:
+        perform_rollback(root, yes=yes)
+    except RollbackError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
