@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from .config import ConfigError, load_config
+from .init import InitError, init_project
 from .preflight import PreflightError
 from .project import ProjectError, load_tasks
 from .results import ResultsStore, ResultsStoreError
@@ -19,10 +20,10 @@ logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 
 _STATUS_STYLE: dict[str, dict] = {
     "completed": {"fg": "bright_green"},
-    "failed":    {"fg": "red"},
-    "running":   {"fg": "yellow"},
-    "skipped":   {"fg": "white", "dim": True},
-    "—":         {"fg": "white", "dim": True},
+    "failed": {"fg": "red"},
+    "running": {"fg": "yellow"},
+    "skipped": {"fg": "white", "dim": True},
+    "—": {"fg": "white", "dim": True},
 }
 
 
@@ -34,6 +35,73 @@ def _find_project_root() -> Path:
 @click.group()
 def cli() -> None:
     """agent-build: structured task execution for coding agents."""
+
+
+@cli.command()
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Remove existing files and reinitialize.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation prompts (use with --force).",
+)
+@click.option(
+    "--git",
+    is_flag=True,
+    default=None,
+    help="Initialize a git repository.",
+)
+@click.option(
+    "--global",
+    "global_flag",
+    is_flag=True,
+    default=False,
+    help="Create global/GLOBAL.md with a template header.",
+)
+@click.option(
+    "--template",
+    type=str,
+    default="minimal",
+    help="Template to use (default: minimal).",
+)
+@click.argument("project_root", type=click.Path(), default=".")
+def init(
+    force: bool,
+    yes: bool,
+    git: bool | None,
+    global_flag: bool,
+    template: str,
+    project_root: str,
+) -> None:
+    """Initialize a new agent-build project."""
+    import os
+    from .init import init_project, list_builtin_templates
+
+    root = Path(project_root).resolve()
+
+    if git is None:
+        git = not (root / ".git").exists()
+
+    try:
+        init_project(
+            root,
+            force=force,
+            git=git,
+            global_flag=global_flag,
+            template=template if template != "minimal" else None,
+            yes=yes,
+        )
+    except InitError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Initialized agent-build project at {root}")
 
 
 @cli.command()
@@ -100,7 +168,10 @@ def _execute_task(
     """Run a single task, translating known errors to user-facing messages."""
     try:
         run_task(  # type: ignore[arg-type]
-            root, task, store, config,
+            root,
+            task,
+            store,
+            config,
             tasks_to_skip=tasks_to_skip,
             yes=yes,
             skip_build=skip_build,
@@ -197,14 +268,22 @@ def _run_explicit_task(
             tasks_to_skip.append(task)
 
     # 6. Execute the target task (skipped records written inside after lock)
-    _execute_task(root, target, store, config, tasks_to_skip=tasks_to_skip, yes=yes,
-                  skip_build=skip_build)
+    _execute_task(
+        root,
+        target,
+        store,
+        config,
+        tasks_to_skip=tasks_to_skip,
+        yes=yes,
+        skip_build=skip_build,
+    )
 
 
 @cli.command()
 @click.argument("task_id", required=False)
 @click.option(
-    "--yes", "-y",
+    "--yes",
+    "-y",
     is_flag=True,
     default=False,
     help="Auto-confirm all prompts (useful for scripting).",
@@ -237,8 +316,9 @@ def run(task_id: str | None, yes: bool, skip_build: bool) -> None:
     store = ResultsStore(root / "results")
 
     if task_id is not None:
-        _run_explicit_task(root, task_id, tasks, store, config, yes=yes,
-                           skip_build=skip_build)
+        _run_explicit_task(
+            root, task_id, tasks, store, config, yes=yes, skip_build=skip_build
+        )
         return
 
     # Normal resume flow
