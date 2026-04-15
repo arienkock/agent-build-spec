@@ -16,7 +16,8 @@ The root directory of an Agent Build Spec project **MUST** have the following st
 │   └── <Task ID>/
 │       └── TASK.md
 ├── global/           # optional
-│   └── GLOBAL.md
+│   ├── GLOBAL.md
+│   └── REVIEW.md
 ├── verifications/
 │   └── <Verification ID>.md
 ├── results/
@@ -28,6 +29,7 @@ The root directory of an Agent Build Spec project **MUST** have the following st
 - `tasks/.../`: Multiple subdirectories. One per task.
 - `TASK.md`: Entrypoint for task instructions.
 - `global/GLOBAL.md`: Entrypoint for global instructions valid across all tasks. This directory and file are **optional**; if absent, no global instructions are provided to the agent.
+- `global/REVIEW.md`: Entrypoint for review instructions valid across all tasks. This file is **optional**; if absent, the agent does not perform a review step.
 - `verifications/<...>.md`: Entrypoints for verification checks.
 - `results/`: Directory containing all task results records. Created automatically on first use.
 - `src/`: Persistent source directory that serves as the base for agent workspaces.
@@ -55,6 +57,10 @@ A Verification is a validation check defined by a Markdown file in the `verifica
 ### Global Instructions
 
 Global Instructions are optionally provided in `global/GLOBAL.md` and contain context applicable across all tasks. If the `global/` directory or `GLOBAL.md` file is absent, the system **MUST** proceed without global instructions. Task instructions **MAY** reference concepts defined in global instructions, as they are made available to the agent when present.
+
+### Review Instructions
+
+Review Instructions are optionally provided in `global/REVIEW.md` and contain instructions for the agent to review its work before verifications begin. If the `global/` directory or `REVIEW.md` file is absent, the system **MUST** proceed without a review step. Review instructions **MUST** be executed by the implementation agent in the same session used for the task implementation. This allows the agent to maintain context and make final adjustments before the verification phase. The review step occurs only once, after the initial implementation is completed and before the first verification check.
 
 ---
 
@@ -129,11 +135,12 @@ The system **MUST** ensure that `src/.agent-context/` does not already exist bef
 
 ### Agent Invocation
 
-The agent is invoked as a non-interactive subprocess with captured STDIO. The agent operates within the workspace and **MUST NOT** alter the parent terminal state. The task runner **MUST** listen for asynchronous messages dispatched by the agent runner while it is executing, so that progress and status information can be acted upon without waiting for the subprocess to terminate.
+The agent is invoked as a non-interactive subprocess with captured STDIO. The agent operates within the workspace and **MUST NOT** alter the parent terminal state. The task runner **MUST** listen for asynchronous messages dispatched by the agent runner while it is executing, so that progress and status information can be acted upon without waiting for the subprocess to terminate. This includes capturing implementation-defined session identifiers (e.g. session IDs or task IDs) that allow for subsequent invocations to reuse the same context.
 
-The system **SHOULD** provide live progress feedback to the user while the agent is running. If the agent implementation exposes token consumption or cost metrics via asynchronous messages, those **SHOULD** be surfaced in real time. Otherwise, the system **SHOULD** periodically report the net lines added and removed across all changes in `src/` relative to the base commit (including untracked, non-ignored files), as a lightweight signal that work is progressing.
+If `global/REVIEW.md` exists, the system **MUST** invoke the agent a second time after the initial implementation phase completes successfully. This second invocation **MUST** use the content of `global/REVIEW.md` as the prompt and **MUST** reuse the session from the first invocation. If no session identifier was returned by the agent during the first invocation, the system **MAY** attempt the review in a fresh session but **SHOULD** warn the user. The review step is considered part of the implementation phase; if it fails or times out, the task run follows the standard retry logic.
 
 ### Verification Execution
+
 
 Upon agent completion, verifications are executed in lexicographical order of their ID. The first verification that returns `"status": "FAIL"` halts further verification. The verification agent's `reasoning` **MUST** be appended to the original task prompt before re-invoking the implementation agent as a retry.
 
@@ -181,6 +188,14 @@ Verification checks that will be run against your output are defined as files in
 success looks like.
 
 Complete the task. When you are done, stop. Verifications will be run automatically.
+```
+
+## Example: Review Prompt
+
+If `global/REVIEW.md` exists, it is sent as a subsequent message in the same session:
+
+```
+[Content of global/REVIEW.md]
 ```
 
 ## Example: Verification Retry Prompt

@@ -41,7 +41,11 @@ def _validate_command(command: str, model: str) -> None:
         raise ConfigError("agent_command must not be empty")
 
     # Substitute {model} and {prompt} and check for leftover format fields
-    substituted = command.replace("{model}", model).replace("{prompt}", "")
+    substituted = (
+        command.replace("{model}", model)
+        .replace("{prompt}", "")
+        .replace("{session_id}", "")
+    )
 
     # Detect any remaining {…} placeholders
     remaining = re.findall(r"\{[^}]*\}", substituted)

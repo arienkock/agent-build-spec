@@ -106,8 +106,26 @@ parser.add_argument(
     dest="invocation_count_file",
     help="Path to counter file for stateful sequential behavior",
 )
+parser.add_argument(
+    "--session-id",
+    default=None,
+    dest="session_id",
+    help="Session ID to return in JSON output",
+)
+parser.add_argument(
+    "--create-file-on-prompt",
+    default=None,
+    dest="create_file_on_prompt",
+    help="Prompt string that triggers file creation",
+)
+parser.add_argument(
+    "--create-file-path",
+    default=None,
+    dest="create_file_path",
+    help="Path of the file to create when create-file-on-prompt matches",
+)
 parser.add_argument("prompt", nargs="?", default="", help="Prompt passed to the agent")
-args = parser.parse_args()
+args, unknown = parser.parse_known_args()
 
 stdin_content = args.prompt
 
@@ -157,9 +175,25 @@ if IS_VERIFICATION:
 
 else:
     # Agent mode: optionally create a file, then exit with the configured code
+    if args.session_id:
+        print(json.dumps({"type": "session", "session_id": args.session_id}))
+
     if args.create_file:
         p = Path(args.create_file)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("fake agent output\n")
+
+    if args.create_file_on_prompt:
+        found = args.create_file_on_prompt in stdin_content
+        if not found:
+            for u in unknown:
+                if args.create_file_on_prompt in u:
+                    found = True
+                    break
+        if found:
+            if args.create_file_path:
+                p = Path(args.create_file_path)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("created on review prompt\n")
 
     sys.exit(args.exit_code)

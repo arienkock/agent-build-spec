@@ -34,6 +34,7 @@ class AgentResult:
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     cost: Optional[float] = None
+    session_id: Optional[str] = None
 
 
 class OpenCodeParser:
@@ -41,6 +42,7 @@ class OpenCodeParser:
         self.input_tokens = 0
         self.output_tokens = 0
         self.cost = 0.0
+        self.session_id: Optional[str] = None
 
     def parse_line(self, line: str) -> Optional[str]:
         """Parse a JSON line and return a human-readable string if applicable."""
@@ -57,7 +59,9 @@ class OpenCodeParser:
         event_type = data.get("type")
         part = data.get("part", {})
 
-        if event_type == "text":
+        if event_type == "session":
+            self.session_id = data.get("session_id")
+        elif event_type == "text":
             return part.get("text")
         elif event_type == "tool_use":
             tool_name = part.get("tool", "unknown_tool")
@@ -67,6 +71,9 @@ class OpenCodeParser:
             self.input_tokens += tokens.get("input", 0)
             self.output_tokens += tokens.get("output", 0)
             self.cost += part.get("cost", 0.0)
+            # Some agents might provide session_id in step_finish
+            if not self.session_id:
+                self.session_id = data.get("session_id")
 
         return None
 
@@ -114,6 +121,7 @@ def run_agent(
     config: Config,
     prompt: str,
     emitter: EventEmitter,
+    session_id: Optional[str] = None,
 ) -> AgentResult:
     """
     Launch the agent as a subprocess with the given *prompt* via argv.
@@ -142,7 +150,12 @@ def run_agent(
 
     try:
         try:
-            argv = [arg.replace("{prompt}", prompt) for arg in config.agent_argv]
+            argv = [
+                arg.replace("{prompt}", prompt).replace(
+                    "{session_id}", session_id or ""
+                )
+                for arg in config.agent_argv
+            ]
             process = subprocess.Popen(
                 argv,
                 cwd=src_dir,
@@ -191,6 +204,7 @@ def run_agent(
                 input_tokens=parser.input_tokens,
                 output_tokens=parser.output_tokens,
                 cost=parser.cost,
+                session_id=parser.session_id,
             )
         return AgentResult(
             outcome=AgentOutcome.FAILED,
@@ -198,6 +212,7 @@ def run_agent(
             input_tokens=parser.input_tokens,
             output_tokens=parser.output_tokens,
             cost=parser.cost,
+            session_id=parser.session_id,
         )
 
     finally:

@@ -193,6 +193,11 @@ def run_task(
         original_prompt = build_prompt(project_root)
         current_prompt = original_prompt
 
+        review_md = project_root / "src" / ".agent-context" / "global" / "REVIEW.md"
+        review_prompt: Optional[str] = None
+        if review_md.exists():
+            review_prompt = review_md.read_text(encoding="utf-8")
+
         assert base_commit is not None
         output_manager = OutputManager(agent_output_mode, base_commit, project_root)
 
@@ -279,6 +284,78 @@ def run_task(
 
                         # AgentOutcome.COMPLETED — proceed to verification
                         break
+
+                    # ── Optional Review step ──────────────────────────────────────────
+                    if (
+                        not skip_build
+                        and review_prompt
+                        and result.outcome == AgentOutcome.COMPLETED
+                    ):
+                        click.echo(f"Invoking review for task '{task.id}'...")
+                        # Run the review in the same session (if available)
+                        review_result = run_agent(
+                            project_root,
+                            config,
+                            review_prompt,
+                            emitter,
+                            session_id=result.session_id,
+                        )
+
+                        # If review fails or times out, treat it like an implementation failure
+                        if review_result.outcome == AgentOutcome.LAUNCH_ERROR:
+                            _write_failed_record(
+                                store,
+                                task.id,
+                                base_commit,
+                                running_record.start_time,
+                                total_input_tokens + (review_result.input_tokens or 0),
+                                total_output_tokens
+                                + (review_result.output_tokens or 0),
+                                total_cost + (review_result.cost or 0.0),
+                            )
+                            raise TaskRunError(
+                                f"Failed to launch review: {review_result.error}"
+                            )
+
+                        if review_result.input_tokens:
+                            total_input_tokens += review_result.input_tokens
+                        if review_result.output_tokens:
+                            total_output_tokens += review_result.output_tokens
+                        if review_result.cost:
+                            total_cost += review_result.cost
+
+                        if review_result.outcome == AgentOutcome.FAILED:
+                            _write_failed_record(
+                                store,
+                                task.id,
+                                base_commit,
+                                running_record.start_time,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cost,
+                            )
+                            raise TaskRunError(
+                                f"Review agent exited with non-zero exit code: {review_result.exit_code}"
+                            )
+
+                        if review_result.outcome == AgentOutcome.TIMED_OUT:
+                            # If review times out, treat it as a task failure.
+                            # Standard retry logic will apply on the next manual run.
+                            _write_failed_record(
+                                store,
+                                task.id,
+                                base_commit,
+                                running_record.start_time,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cost,
+                            )
+                            raise TaskRunError(
+                                "Review agent timed out. Implementation was completed but review failed."
+                            )
+
+                        # Update result to reflect review success (including its session_id)
+                        result = review_result
 
                 # ── Verification phase ─────────────────────────────────────────────
                 v_status, failing = run_verifications(project_root, config)
