@@ -4,7 +4,7 @@
 
 The `agent-build` tool provides a command-line interface that allows you to initialize, run, and manage tasks structured around this specification.
 
-Learn more about the standard at: https://github.com/arienkock/agent-build-spec
+Learn more about the standard at: https://github.com/arienkock/agent-build-spec/blob/master/agent-build-spec.md
 
 ## Installation
 

@@ -39,7 +39,7 @@ def cli() -> None:
     agent-build: structured task execution for coding agents.
 
     Learn more about the agent-build-spec standard at:
-    https://github.com/arienkock/agent-build-spec
+    https://github.com/arienkock/agent-build-spec/blob/master/agent-build-spec.md
     """
 
 
