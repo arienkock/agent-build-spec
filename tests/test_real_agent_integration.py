@@ -25,9 +25,10 @@ def test_real_agent_run_free_model(tmp_path: Path):
     config_path = project_root / "agent-build.config.json"
     config = json.loads(config_path.read_text())
     config["model"] = "openrouter/openrouter/free"
-    # We add a tiny prompt suffix to make it quick and predictable
+    # We add a tiny prompt suffix to make it quick and predictable.
+    # We also include {session_id} to test session reuse.
     config["agent_command"] = (
-        "opencode run \"{prompt}. Just output 'OK' and nothing else.\" --model {model} --dangerously-skip-permissions --format json"
+        "opencode run \"{prompt}. Just output 'OK' and nothing else.\" --model {model} --dangerously-skip-permissions --format json sess_id={session_id}"
     )
     config_path.write_text(json.dumps(config))
 
@@ -36,11 +37,18 @@ def test_real_agent_run_free_model(tmp_path: Path):
     task_dir.mkdir(parents=True)
     (task_dir / "TASK.md").write_text("# Test Task\nThis is a real integration test.\n")
 
+    # 4. Create a global REVIEW.md
+    global_dir = project_root / "global"
+    global_dir.mkdir(exist_ok=True)
+    (global_dir / "REVIEW.md").write_text(
+        "Review task. Just output 'REVIEWED' and nothing else."
+    )
+
     # Initial commit is required before running agent-build
     subprocess.run(["git", "add", "."], cwd=project_root)
     subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=project_root)
 
-    # 4. Run the task using agent-build
+    # 5. Run the task using agent-build
     # We use hidden mode to prevent dirtying stdout, but append is fine too.
     run_res = subprocess.run(
         ["agent-build", "run", "--yes"],
@@ -50,9 +58,14 @@ def test_real_agent_run_free_model(tmp_path: Path):
     )
 
     # Check that it completed successfully
-    assert run_res.returncode == 0, f"agent-build failed: {run_res.stderr}"
+    assert run_res.returncode == 0, (
+        f"agent-build failed: {run_res.stderr}\nSTDOUT: {run_res.stdout}"
+    )
 
-    # 5. Assert the results metadata contains actual metrics
+    # Assert review invocation appeared in stdout
+    assert "Invoking review for task '001-real-test'..." in run_res.stdout
+
+    # 6. Assert the results metadata contains actual metrics
     record_path = project_root / "results" / "results-001-real-test.json"
     assert record_path.exists()
     record = json.loads(record_path.read_text())
