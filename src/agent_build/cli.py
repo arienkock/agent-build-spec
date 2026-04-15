@@ -106,6 +106,122 @@ def init(
 
 
 @cli.command()
+@click.argument("task_id")
+def history(task_id: str) -> None:
+    """Show execution history for a specific task."""
+    root = _find_project_root()
+
+    from .project import load_tasks
+
+    tasks = load_tasks(root)
+    if not tasks:
+        click.echo("No tasks found in project.", err=True)
+        sys.exit(1)
+
+    task = next((t for t in tasks if t.id == task_id), None)
+    if not task:
+        click.echo(f"Task '{task_id}' not found.", err=True)
+        sys.exit(1)
+
+    store = ResultsStore(root / "results")
+
+    # Check if there are any results at all
+    if not store.results_dir.exists():
+        click.echo(f"No execution history found for task '{task_id}'.")
+        return
+
+    # Gather all results for this task (latest + archived)
+    import re
+    import json
+
+    _LATEST_RE = re.compile(r"^results-(.+)\.json$")
+    _ARCHIVED_RE = re.compile(r"^results-(.+)--run-(\d+)\.json$")
+
+    history_records = []
+
+    for p in store.results_dir.iterdir():
+        m_archived = _ARCHIVED_RE.match(p.name)
+        if m_archived and m_archived.group(1) == task_id:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                record = store._from_dict(data)
+                history_records.append(
+                    {
+                        "order": int(m_archived.group(2)),
+                        "is_latest": False,
+                        "record": record,
+                        "filename": p.name,
+                    }
+                )
+            except Exception:
+                pass
+            continue
+
+        m_latest = _LATEST_RE.match(p.name)
+        if m_latest and m_latest.group(1) == task_id:
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                record = store._from_dict(data)
+                history_records.append(
+                    {
+                        "order": float("inf"),
+                        "is_latest": True,
+                        "record": record,
+                        "filename": p.name,
+                    }
+                )
+            except Exception:
+                pass
+
+    if not history_records:
+        click.echo(f"No execution history found for task '{task_id}'.")
+        return
+
+    # Sort chronologically (by order, with latest at the end)
+    history_records.sort(key=lambda x: x["order"])
+
+    click.echo(f"Execution History for Task: {task_id}")
+    click.echo("=" * 60)
+
+    for item in history_records:
+        record = item["record"]
+        is_latest = item["is_latest"]
+
+        status_color = (
+            "green"
+            if record.status == "completed"
+            else "red"
+            if record.status == "failed"
+            else "yellow"
+        )
+
+        label = "LATEST" if is_latest else f"RUN {item['order']}"
+        click.echo(f"[{label}] Status: ", nl=False)
+        click.secho(record.status.value.upper(), fg=status_color, bold=True)
+
+        if record.start_time:
+            click.echo(f"  Started: {record.start_time}")
+        if record.end_time:
+            click.echo(f"  Ended:   {record.end_time}")
+
+        metrics = []
+        if record.input_tokens is not None:
+            metrics.append(f"In Tokens: {record.input_tokens}")
+        if record.output_tokens is not None:
+            metrics.append(f"Out Tokens: {record.output_tokens}")
+        if record.cost is not None:
+            metrics.append(f"Cost: ${record.cost:.4f}")
+
+        if metrics:
+            click.echo(f"  Metrics: {', '.join(metrics)}")
+
+        if record.base_commit:
+            click.echo(f"  Base Commit: {record.base_commit[:7]}")
+
+        click.echo("-" * 60)
+
+
+@cli.command()
 def status() -> None:
     """Show the status of all tasks and what will run next."""
     root = _find_project_root()
