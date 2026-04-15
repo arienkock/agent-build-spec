@@ -150,11 +150,14 @@ def run_agent(
 
     try:
         try:
+            template_argv = (
+                config.agent_resume_argv if session_id else config.agent_argv
+            )
             argv = [
                 arg.replace("{prompt}", prompt).replace(
                     "{session_id}", session_id or ""
                 )
-                for arg in config.agent_argv
+                for arg in template_argv
             ]
             process = subprocess.Popen(
                 argv,

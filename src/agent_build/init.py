@@ -22,6 +22,7 @@ GITIGNORE_DEFAULTS = [
 
 CONFIG_DEFAULTS = {
     "agent_command": "opencode run {prompt} --model {model} --dangerously-skip-permissions --format json",
+    "agent_resume_command": "opencode run {prompt} --session {session_id} --model {model} --dangerously-skip-permissions --format json",
     "model": "openrouter/google/gemini-2.5-pro",
     "agent_timeout_seconds": 600,
     "verification_timeout_seconds": 120,

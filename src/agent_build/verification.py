@@ -20,6 +20,7 @@ class VerificationResult:
     status: VerificationStatus
     reasoning: str
     verification_id: str  # filename stem, e.g. "001-check"
+    timed_out: bool = False
 
 
 def _build_verification_prompt(file_content: str) -> str:
@@ -113,6 +114,7 @@ def _run_single_verification(
                     f"{config.verification_timeout_seconds} seconds."
                 ),
                 verification_id=verification_id,
+                timed_out=True,
             )
         except KeyboardInterrupt:
             process.kill()

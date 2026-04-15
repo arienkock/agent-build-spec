@@ -65,6 +65,7 @@ def _make_config(
     # raw output strings containing '{...}' don't trip the placeholder check.
     return Config(
         agent_command=cmd,
+        agent_resume_command=cmd,
         model="test-model",
         agent_timeout_seconds=10,
         verification_timeout_seconds=verification_timeout_seconds,
@@ -204,6 +205,7 @@ def test_oserror_fail(tmp_path):
     # Use a bogus command that cannot be launched
     bad_config = Config(
         agent_command="/nonexistent/binary/agent --model {model} {prompt}",
+        agent_resume_command="/nonexistent/binary/agent --model {model} {prompt}",
         model="test",
         agent_timeout_seconds=10,
         verification_timeout_seconds=10,
