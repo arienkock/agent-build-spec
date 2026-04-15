@@ -35,7 +35,12 @@ def _find_project_root() -> Path:
 
 @click.group()
 def cli() -> None:
-    """agent-build: structured task execution for coding agents."""
+    """
+    agent-build: structured task execution for coding agents.
+
+    Learn more about the agent-build-spec standard at:
+    https://github.com/arienkock/agent-build-spec
+    """
 
 
 @cli.command()
