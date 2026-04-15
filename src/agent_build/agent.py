@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -29,6 +31,44 @@ class AgentResult:
     outcome: AgentOutcome
     exit_code: Optional[int] = None
     error: Optional[Exception] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    cost: Optional[float] = None
+
+
+class OpenCodeParser:
+    def __init__(self) -> None:
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cost = 0.0
+
+    def parse_line(self, line: str) -> Optional[str]:
+        """Parse a JSON line and return a human-readable string if applicable."""
+        line = line.strip()
+        if not line:
+            return None
+
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            # If it's not valid JSON, just pass it through as raw text
+            return line
+
+        event_type = data.get("type")
+        part = data.get("part", {})
+
+        if event_type == "text":
+            return part.get("text")
+        elif event_type == "tool_use":
+            tool_name = part.get("tool", "unknown_tool")
+            return f"\n> Using tool: {tool_name}\n"
+        elif event_type == "step_finish":
+            tokens = part.get("tokens", {})
+            self.input_tokens += tokens.get("input", 0)
+            self.output_tokens += tokens.get("output", 0)
+            self.cost += part.get("cost", 0.0)
+
+        return None
 
 
 def build_prompt(project_root: Path) -> str:
@@ -79,7 +119,7 @@ def run_agent(
     Launch the agent as a subprocess with the given *prompt* via argv.
 
     - cwd is set to <project_root>/src/
-    - stdout/stderr are captured; no TTY is allocated
+    - stdout/stderr are captured line by line to support streaming json
     - stdin is mapped to DEVNULL
     - A SIGTERM handler is installed for the duration of the call; on SIGTERM
       the subprocess is killed, reaped, and SystemExit(1) is raised so that
@@ -98,6 +138,7 @@ def run_agent(
         raise SystemExit(1)
 
     old_sigterm = signal.signal(signal.SIGTERM, _sigterm_handler)
+    parser = OpenCodeParser()
 
     try:
         try:
@@ -109,16 +150,28 @@ def run_agent(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                bufsize=1,  # Line buffered
             )
         except OSError as exc:
             return AgentResult(outcome=AgentOutcome.LAUNCH_ERROR, error=exc)
 
         emitter.emit(AgentStarted())
 
+        import threading
+
+        def output_reader():
+            assert process.stdout is not None
+            for line in iter(process.stdout.readline, ""):
+                human_text = parser.parse_line(line)
+                if human_text:
+                    emitter.emit(AgentOutput(chunk=human_text))
+
+        reader_thread = threading.Thread(target=output_reader, daemon=True)
+        reader_thread.start()
+
         try:
-            stdout, _ = process.communicate(
-                timeout=config.agent_timeout_seconds,
-            )
+            process.wait(timeout=config.agent_timeout_seconds)
+            reader_thread.join(timeout=1.0)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
@@ -129,13 +182,23 @@ def run_agent(
             process.wait()
             raise
 
-        if stdout:
-            emitter.emit(AgentOutput(chunk=stdout))
         emitter.emit(AgentCompleted(exit_code=process.returncode))
 
         if process.returncode == 0:
-            return AgentResult(outcome=AgentOutcome.COMPLETED, exit_code=0)
-        return AgentResult(outcome=AgentOutcome.FAILED, exit_code=process.returncode)
+            return AgentResult(
+                outcome=AgentOutcome.COMPLETED,
+                exit_code=0,
+                input_tokens=parser.input_tokens,
+                output_tokens=parser.output_tokens,
+                cost=parser.cost,
+            )
+        return AgentResult(
+            outcome=AgentOutcome.FAILED,
+            exit_code=process.returncode,
+            input_tokens=parser.input_tokens,
+            output_tokens=parser.output_tokens,
+            cost=parser.cost,
+        )
 
     finally:
         signal.signal(signal.SIGTERM, old_sigterm)

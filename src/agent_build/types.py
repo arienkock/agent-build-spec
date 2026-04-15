@@ -31,13 +31,14 @@ class ResultRecord:
     io_time: Optional[float] = None
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
+    cost: Optional[float] = None
 
 
 class ResumePointKind(str, Enum):
     READY = "ready"
     COMPLETE = "complete"
     NEEDS_CONFIRMATION = "needs_confirmation"  # running task found
-    ERROR = "error"                            # ambiguous state
+    ERROR = "error"  # ambiguous state
 
 
 @dataclass

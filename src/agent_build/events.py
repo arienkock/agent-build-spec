@@ -12,12 +12,14 @@ class AgentStarted:
 @dataclass
 class AgentOutput:
     """Emitted as output chunks arrive from the agent."""
+
     chunk: str
 
 
 @dataclass
 class AgentCompleted:
     """Emitted when the agent subprocess exits normally."""
+
     exit_code: int
 
 
@@ -26,7 +28,16 @@ class AgentTimedOut:
     """Emitted when the agent subprocess is killed due to timeout."""
 
 
-AgentEvent = Union[AgentStarted, AgentOutput, AgentCompleted, AgentTimedOut]
+@dataclass
+class AgentProgress:
+    """Emitted periodically with git stat diffs against the base commit."""
+
+    stats: str
+
+
+AgentEvent = Union[
+    AgentStarted, AgentOutput, AgentProgress, AgentCompleted, AgentTimedOut
+]
 
 
 class EventEmitter:

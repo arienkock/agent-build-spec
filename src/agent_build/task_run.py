@@ -16,6 +16,7 @@ from .preflight import PreflightError, release_lock
 from .results import ResultsStore
 from .types import ResultRecord, Task, TaskRunStatus
 from .verification import VerificationStatus, run_verifications
+from .ui import OutputManager
 
 
 class TaskRunError(Exception):
@@ -68,6 +69,9 @@ def _write_failed_record(
     task_id: str,
     base_commit: Optional[str],
     start_time: Optional[str],
+    input_tokens: Optional[int] = None,
+    output_tokens: Optional[int] = None,
+    cost: Optional[float] = None,
 ) -> None:
     """Archive the current latest record and write a FAILED record."""
     prev = store.next_archive_filename(task_id)
@@ -79,6 +83,9 @@ def _write_failed_record(
             base_commit=base_commit,
             start_time=start_time,
             end_time=_now_iso(),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost=cost,
         ),
     )
 
@@ -124,6 +131,7 @@ def run_task(
     tasks_to_skip: list[Task] | None = None,
     yes: bool = False,
     skip_build: bool = False,
+    agent_output_mode: str = "append",
 ) -> None:
     """
     Execute the full task-run cycle for *task*:
@@ -157,7 +165,7 @@ def run_task(
         lock_acquired = True
 
         # ── Write SKIPPED records for any explicit-targeting intermediates ─────
-        for skip_task in (tasks_to_skip or []):
+        for skip_task in tasks_to_skip or []:
             prev_skip = store.next_archive_filename(skip_task.id)
             store.write(
                 skip_task.id,
@@ -185,130 +193,184 @@ def run_task(
         original_prompt = build_prompt(project_root)
         current_prompt = original_prompt
 
+        assert base_commit is not None
+        output_manager = OutputManager(agent_output_mode, base_commit, project_root)
+
         emitter = EventEmitter()
-        emitter.subscribe(_on_agent_event)
+        emitter.subscribe(output_manager.on_event)
 
         retries_left = config.max_retries
+        output_manager.start()
 
-        # ── Outer loop: agent invocation + verification cycle ──────────────────
-        while True:
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_cost = 0.0
 
-            # ── Agent invocation phase ─────────────────────────────────────────
-            if skip_build:
-                click.echo("Skipping build step (--skip-build).")
-            else:
-                click.echo(f"Invoking agent for task '{task.id}'...")
+        try:
+            # ── Outer loop: agent invocation + verification cycle ──────────────────
+            while True:
+                # ── Agent invocation phase ─────────────────────────────────────────
+                if skip_build:
+                    click.echo("Skipping build step (--skip-build).")
+                else:
+                    click.echo(f"Invoking agent for task '{task.id}'...")
 
-                # Inner timeout-retry sub-loop
-                while True:
-                    result = run_agent(project_root, config, current_prompt, emitter)
-
-                    if result.outcome == AgentOutcome.LAUNCH_ERROR:
-                        _write_failed_record(
-                            store, task.id, base_commit, running_record.start_time
-                        )
-                        raise TaskRunError(
-                            f"Failed to launch agent: {result.error}"
-                        )
-
-                    if result.outcome == AgentOutcome.FAILED:
-                        _write_failed_record(
-                            store, task.id, base_commit, running_record.start_time
-                        )
-                        raise TaskRunError(
-                            f"Agent exited with non-zero exit code: {result.exit_code}"
+                    # Inner timeout-retry sub-loop
+                    while True:
+                        result = run_agent(
+                            project_root, config, current_prompt, emitter
                         )
 
-                    if result.outcome == AgentOutcome.TIMED_OUT:
-                        if retries_left <= 0:
+                        if result.outcome == AgentOutcome.LAUNCH_ERROR:
                             _write_failed_record(
-                                store, task.id, base_commit, running_record.start_time
+                                store,
+                                task.id,
+                                base_commit,
+                                running_record.start_time,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cost,
                             )
                             raise TaskRunError(
-                                "Agent timed out and the retry limit is exhausted."
+                                f"Failed to launch agent: {result.error}"
                             )
-                        retries_left -= 1
-                        click.echo(
-                            f"Agent timed out. "
-                            f"Retrying ({retries_left} retries remaining)..."
-                        )
-                        continue  # retry agent with same current_prompt
 
-                    # AgentOutcome.COMPLETED — proceed to verification
-                    break
+                        if result.input_tokens:
+                            total_input_tokens += result.input_tokens
+                        if result.output_tokens:
+                            total_output_tokens += result.output_tokens
+                        if result.cost:
+                            total_cost += result.cost
 
-            # ── Verification phase ─────────────────────────────────────────────
-            v_status, failing = run_verifications(project_root, config)
+                        if result.outcome == AgentOutcome.FAILED:
+                            _write_failed_record(
+                                store,
+                                task.id,
+                                base_commit,
+                                running_record.start_time,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cost,
+                            )
+                            raise TaskRunError(
+                                f"Agent exited with non-zero exit code: {result.exit_code}"
+                            )
 
-            if v_status == VerificationStatus.PASS:
-                break  # all verifications passed; proceed to COMPLETED record
+                        if result.outcome == AgentOutcome.TIMED_OUT:
+                            if retries_left <= 0:
+                                _write_failed_record(
+                                    store,
+                                    task.id,
+                                    base_commit,
+                                    running_record.start_time,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    total_cost,
+                                )
+                                raise TaskRunError(
+                                    "Agent timed out and the retry limit is exhausted."
+                                )
+                            retries_left -= 1
+                            click.echo(
+                                f"Agent timed out. "
+                                f"Retrying ({retries_left} retries remaining)..."
+                            )
+                            continue  # retry agent with same current_prompt
 
-            # Verification failed — retry if attempts remain
-            assert failing is not None
-            _emit_verification_failure(failing.verification_id, failing.reasoning)
-            if retries_left <= 0:
-                _write_failed_record(
-                    store, task.id, base_commit, running_record.start_time
+                        # AgentOutcome.COMPLETED — proceed to verification
+                        break
+
+                # ── Verification phase ─────────────────────────────────────────────
+                v_status, failing = run_verifications(project_root, config)
+
+                if v_status == VerificationStatus.PASS:
+                    break  # all verifications passed; proceed to COMPLETED record
+
+                # Verification failed — retry if attempts remain
+                assert failing is not None
+                _emit_verification_failure(failing.verification_id, failing.reasoning)
+                if retries_left <= 0:
+                    _write_failed_record(
+                        store,
+                        task.id,
+                        base_commit,
+                        running_record.start_time,
+                        total_input_tokens,
+                        total_output_tokens,
+                        total_cost,
+                    )
+                    raise TaskRunError(
+                        f"Verification '{failing.verification_id}' failed and the "
+                        f"retry limit is exhausted.\nReasoning: {failing.reasoning}"
+                    )
+                retries_left -= 1
+                click.echo(f"Retrying ({retries_left} retries remaining)...")
+                # Rebuild retry prompt from original_prompt so only the most recent
+                # failure reasoning is appended (never accumulated).
+                current_prompt = _build_verification_retry_prompt(
+                    original_prompt,
+                    failing.verification_id,
+                    failing.reasoning,
                 )
-                raise TaskRunError(
-                    f"Verification '{failing.verification_id}' failed and the "
-                    f"retry limit is exhausted.\nReasoning: {failing.reasoning}"
-                )
-            retries_left -= 1
-            click.echo(f"Retrying ({retries_left} retries remaining)...")
-            # Rebuild retry prompt from original_prompt so only the most recent
-            # failure reasoning is appended (never accumulated).
-            current_prompt = _build_verification_retry_prompt(
-                original_prompt,
-                failing.verification_id,
-                failing.reasoning,
-            )
-            # continue outer loop
+                # continue outer loop
 
-        # ── Write COMPLETED record ─────────────────────────────────────────────
-        prev_for_completed = store.next_archive_filename(task.id)
-        completed_record = ResultRecord(
-            status=TaskRunStatus.COMPLETED,
-            previous_results=prev_for_completed,
-            base_commit=base_commit,
-            start_time=running_record.start_time,
-            end_time=_now_iso(),
-        )
-        store.write(task.id, completed_record)
-
-        # ── Remove .agent-context/ before committing ───────────────────────────
-        workspace_mod.cleanup(project_root)
-
-        # ── Commit (src/ and results/ only) ───────────────────────────────────
-        try:
-            _stage_and_commit(project_root, task.id)
-        except TaskRunError as exc:
-            msg = str(exc)
-            if msg.startswith("No changes to commit"):
-                raise TaskRunError(msg) from exc
-            # Git commit failed (e.g. pre-commit hook rejected the commit).
-            # src/ and the staged index are mutated but not committed.
-            # Revert the completed record to failed so the next resume point
-            # is unambiguous and the task will be re-attempted.
-            prev_for_failed = store.next_archive_filename(task.id)
-            failed_record = ResultRecord(
-                status=TaskRunStatus.FAILED,
-                previous_results=prev_for_failed,
+            # ── Write COMPLETED record ─────────────────────────────────────────────
+            prev_for_completed = store.next_archive_filename(task.id)
+            completed_record = ResultRecord(
+                status=TaskRunStatus.COMPLETED,
+                previous_results=prev_for_completed,
                 base_commit=base_commit,
                 start_time=running_record.start_time,
                 end_time=_now_iso(),
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                cost=total_cost,
             )
-            store.write(task.id, failed_record)
-            raise TaskRunError(
-                "src/ changes could not be committed — record reverted to 'failed'. "
-                f"Inspect and resolve manually.\nDetails: {msg}"
-            ) from exc
+            store.write(task.id, completed_record)
 
-        elapsed = round(
-            (datetime.now(timezone.utc) - datetime.fromisoformat(running_record.start_time))
-            .total_seconds()
-        )
-        click.echo(f"Task '{task.id}' completed in {elapsed}s.")
+            # ── Remove .agent-context/ before committing ───────────────────────────
+            workspace_mod.cleanup(project_root)
+
+            # ── Commit (src/ and results/ only) ───────────────────────────────────
+            try:
+                _stage_and_commit(project_root, task.id)
+            except TaskRunError as exc:
+                msg = str(exc)
+                if msg.startswith("No changes to commit"):
+                    raise TaskRunError(msg) from exc
+                # Git commit failed (e.g. pre-commit hook rejected the commit).
+                # src/ and the staged index are mutated but not committed.
+                # Revert the completed record to failed so the next resume point
+                # is unambiguous and the task will be re-attempted.
+                prev_for_failed = store.next_archive_filename(task.id)
+                failed_record = ResultRecord(
+                    status=TaskRunStatus.FAILED,
+                    previous_results=prev_for_failed,
+                    base_commit=base_commit,
+                    start_time=running_record.start_time,
+                    end_time=_now_iso(),
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    cost=total_cost,
+                )
+                store.write(task.id, failed_record)
+                raise TaskRunError(
+                    "src/ changes could not be committed — record reverted to 'failed'. "
+                    f"Inspect and resolve manually.\nDetails: {msg}"
+                ) from exc
+
+            elapsed = round(
+                (
+                    datetime.now(timezone.utc)
+                    - datetime.fromisoformat(running_record.start_time)
+                ).total_seconds()
+            )
+            click.echo(f"Task '{task.id}' completed in {elapsed}s.")
+
+        except BaseException:
+            raise
+        finally:
+            output_manager.stop()
 
     finally:
         if lock_acquired:
