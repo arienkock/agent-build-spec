@@ -52,6 +52,8 @@ class ResultsStore:
             d["inputTokens"] = record.input_tokens
         if record.output_tokens is not None:
             d["outputTokens"] = record.output_tokens
+        if record.cost is not None:
+            d["cost"] = record.cost
         return d
 
     @staticmethod
@@ -75,6 +77,7 @@ class ResultsStore:
             io_time=data.get("ioTime"),
             input_tokens=data.get("inputTokens"),
             output_tokens=data.get("outputTokens"),
+            cost=data.get("cost"),
         )
 
     # ------------------------------------------------------------------
@@ -112,9 +115,7 @@ class ResultsStore:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
-            raise ResultsStoreError(
-                f"Malformed JSON in {path.name}: {exc}"
-            ) from exc
+            raise ResultsStoreError(f"Malformed JSON in {path.name}: {exc}") from exc
         return self._from_dict(data)
 
     def task_ids_in_results(self) -> set[str]:

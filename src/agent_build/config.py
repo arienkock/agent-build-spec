@@ -10,8 +10,8 @@ from typing import Optional
 CONFIG_FILENAME = "agent-build.config.json"
 
 DEFAULTS: dict = {
-    "agent_command": "claude --print --dangerously-skip-permissions --model {model} {prompt}",
-    "model": "claude-sonnet-4-6",
+    "agent_command": "opencode run {prompt} --model {model} --dangerously-skip-permissions --format json",
+    "model": "openrouter/google/gemini-2.5-pro",
     "agent_timeout_seconds": 600,
     "verification_timeout_seconds": 120,
     "max_retries": 3,

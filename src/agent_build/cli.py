@@ -165,6 +165,7 @@ def _execute_task(
     tasks_to_skip: list[Task] | None = None,
     yes: bool = False,
     skip_build: bool = False,
+    agent_output_mode: str = "append",
 ) -> None:
     """Run a single task, translating known errors to user-facing messages."""
     try:
@@ -176,6 +177,7 @@ def _execute_task(
             tasks_to_skip=tasks_to_skip,
             yes=yes,
             skip_build=skip_build,
+            agent_output_mode=agent_output_mode,
         )
     except (PreflightError, WorkspaceError, TaskRunError) as exc:
         click.echo(f"Error: {exc}", err=True)
@@ -190,6 +192,7 @@ def _run_explicit_task(
     config: object,
     yes: bool = False,
     skip_build: bool = False,
+    agent_output_mode: str = "append",
 ) -> None:
     """
     Handle `agent-build run <task-id>` (explicit task targeting).
@@ -277,6 +280,7 @@ def _run_explicit_task(
         tasks_to_skip=tasks_to_skip,
         yes=yes,
         skip_build=skip_build,
+        agent_output_mode=agent_output_mode,
     )
 
 
@@ -298,7 +302,15 @@ def _run_explicit_task(
         "Useful after manually fixing src/."
     ),
 )
-def run(task_id: str | None, yes: bool, skip_build: bool) -> None:
+@click.option(
+    "--agent-output-mode",
+    type=click.Choice(["append", "ui", "hidden"]),
+    default="append",
+    help="How to display agent output (default: append).",
+)
+def run(
+    task_id: str | None, yes: bool, skip_build: bool, agent_output_mode: str
+) -> None:
     """Run the next task (or a specific task by ID)."""
     root = _find_project_root()
 
@@ -318,7 +330,14 @@ def run(task_id: str | None, yes: bool, skip_build: bool) -> None:
 
     if task_id is not None:
         _run_explicit_task(
-            root, task_id, tasks, store, config, yes=yes, skip_build=skip_build
+            root,
+            task_id,
+            tasks,
+            store,
+            config,
+            yes=yes,
+            skip_build=skip_build,
+            agent_output_mode=agent_output_mode,
         )
         return
 
@@ -344,7 +363,15 @@ def run(task_id: str | None, yes: bool, skip_build: bool) -> None:
             sys.exit(0)
 
     assert resume.task is not None
-    _execute_task(root, resume.task, store, config, yes=yes, skip_build=skip_build)
+    _execute_task(
+        root,
+        resume.task,
+        store,
+        config,
+        yes=yes,
+        skip_build=skip_build,
+        agent_output_mode=agent_output_mode,
+    )
 
 
 @cli.command()
