@@ -210,6 +210,7 @@ def run_task(
         total_input_tokens = 0
         total_output_tokens = 0
         total_cost = 0.0
+        session_id: Optional[str] = None
 
         try:
             # ── Outer loop: agent invocation + verification cycle ──────────────────
@@ -223,8 +224,15 @@ def run_task(
                     # Inner timeout-retry sub-loop
                     while True:
                         result = run_agent(
-                            project_root, config, current_prompt, emitter
+                            project_root,
+                            config,
+                            current_prompt,
+                            emitter,
+                            session_id=session_id,
                         )
+
+                        if result.session_id:
+                            session_id = result.session_id
 
                         if result.outcome == AgentOutcome.LAUNCH_ERROR:
                             _write_failed_record(
@@ -280,6 +288,7 @@ def run_task(
                                 f"Agent timed out. "
                                 f"Retrying ({retries_left} retries remaining)..."
                             )
+                            session_id = None  # Reset session on timeout
                             continue  # retry agent with same current_prompt
 
                         # AgentOutcome.COMPLETED — proceed to verification
@@ -298,8 +307,11 @@ def run_task(
                             config,
                             review_prompt,
                             emitter,
-                            session_id=result.session_id,
+                            session_id=session_id,
                         )
+
+                        if review_result.session_id:
+                            session_id = review_result.session_id
 
                         # If review fails or times out, treat it like an implementation failure
                         if review_result.outcome == AgentOutcome.LAUNCH_ERROR:
@@ -382,6 +394,10 @@ def run_task(
                     )
                 retries_left -= 1
                 click.echo(f"Retrying ({retries_left} retries remaining)...")
+
+                if not failing.timed_out:
+                    session_id = None  # Reset session on normal verification failure
+
                 # Rebuild retry prompt from original_prompt so only the most recent
                 # failure reasoning is appended (never accumulated).
                 current_prompt = _build_verification_retry_prompt(

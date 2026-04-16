@@ -49,6 +49,12 @@ parser.add_argument(
     dest="create_file",
     help="Create a file at this path relative to cwd (src/)",
 )
+parser.add_argument(
+    "--sleep",
+    type=float,
+    default=0,
+    help="Sleep N seconds before responding in agent mode",
+)
 # Verification mode
 parser.add_argument(
     "--verification-fail",
@@ -174,6 +180,9 @@ if IS_VERIFICATION:
     sys.exit(args.verification_exit_code)
 
 else:
+    if args.sleep > 0:
+        time.sleep(args.sleep)
+
     # Agent mode: optionally create a file, then exit with the configured code
     if args.session_id:
         print(json.dumps({"type": "session", "session_id": args.session_id}))
