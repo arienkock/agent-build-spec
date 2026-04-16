@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -20,6 +20,16 @@ class Task:
 
 
 @dataclass
+class AgentInvocation:
+    type: str  # "implementation", "review", "verification"
+    model: str
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    cost: Optional[float] = None
+    verification_id: Optional[str] = None
+
+
+@dataclass
 class ResultRecord:
     status: TaskRunStatus
     previous_results: Optional[str]  # archived filename or None
@@ -32,6 +42,7 @@ class ResultRecord:
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     cost: Optional[float] = None
+    invocations: list[AgentInvocation] = field(default_factory=list)
 
 
 class ResumePointKind(str, Enum):

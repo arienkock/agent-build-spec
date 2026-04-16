@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import json
-import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from .agent import AgentOutcome, run_agent
 from .config import Config
+from .events import EventEmitter
+from .types import AgentInvocation
 
 
 class VerificationStatus(str, Enum):
@@ -41,33 +42,26 @@ def _build_verification_prompt(file_content: str) -> str:
     )
 
 
-def _parse_last_json_line(stdout: str) -> Optional[dict]:
-    """Return the parsed JSON from the last non-empty line, or None on failure."""
-    lines = [line for line in stdout.splitlines() if line.strip()]
-    if not lines:
-        return None
-    try:
-        return json.loads(lines[-1])
-    except (json.JSONDecodeError, ValueError):
-        return None
-
-
 def _run_single_verification(
     verification_file: Path,
     project_root: Path,
     config: Config,
-) -> VerificationResult:
+    emitter: EventEmitter,
+) -> tuple[VerificationResult, AgentInvocation]:
     """
     Run a single verification agent for *verification_file*.
 
-    Returns a VerificationResult with PASS or FAIL status.
+    Returns a tuple of (VerificationResult, AgentInvocation).
     All error conditions (OSError, timeout, non-zero exit, empty/non-JSON output)
     produce a synthetic FAIL; parse exceptions are never propagated.
-    SIGINT kills the subprocess and re-raises so the outer finally block in
-    task_run.py releases the lock.
     """
     verification_id = verification_file.stem
-    src_dir = project_root / "src"
+
+    invocation = AgentInvocation(
+        type="verification",
+        model=config.model,
+        verification_id=verification_id,
+    )
 
     try:
         file_content = verification_file.read_text(encoding="utf-8")
@@ -76,124 +70,114 @@ def _run_single_verification(
             status=VerificationStatus.FAIL,
             reasoning=f"Verification file could not be read: {exc}",
             verification_id=verification_id,
-        )
+        ), invocation
 
     prompt = _build_verification_prompt(file_content)
 
-    process: Optional[subprocess.Popen[str]] = None
+    # Note: run_agent handles timeout, process management, and sigterm.
+    # It also emits events on the supplied emitter.
+    verification_config = Config(
+        agent_command=config.agent_command,
+        agent_resume_command=config.agent_resume_command,
+        model=config.model,
+        agent_timeout_seconds=config.verification_timeout_seconds,
+        verification_timeout_seconds=config.verification_timeout_seconds,
+        max_retries=config.max_retries,
+    )
+    agent_result = run_agent(
+        project_root=project_root,
+        config=verification_config,
+        prompt=prompt,
+        emitter=emitter,
+    )
+
+    invocation.input_tokens = agent_result.input_tokens
+    invocation.output_tokens = agent_result.output_tokens
+    invocation.cost = agent_result.cost
+
+    if agent_result.outcome == AgentOutcome.LAUNCH_ERROR:
+        return VerificationResult(
+            status=VerificationStatus.FAIL,
+            reasoning=f"Verification could not be launched: {agent_result.error}",
+            verification_id=verification_id,
+        ), invocation
+
+    if agent_result.outcome == AgentOutcome.TIMED_OUT:
+        return VerificationResult(
+            status=VerificationStatus.FAIL,
+            reasoning=(
+                f"Verification timed out after "
+                f"{config.verification_timeout_seconds} seconds."
+            ),
+            verification_id=verification_id,
+            timed_out=True,
+        ), invocation
+
+    if agent_result.outcome == AgentOutcome.FAILED:
+        return VerificationResult(
+            status=VerificationStatus.FAIL,
+            reasoning=f"Verification exited with non-zero exit code {agent_result.exit_code}.",
+            verification_id=verification_id,
+        ), invocation
+
+    # Parse last_json returned by agent
+    data = agent_result.last_json
+
+    if data is None:
+        return VerificationResult(
+            status=VerificationStatus.FAIL,
+            reasoning="Verification produced no valid JSON output or could not be parsed.",
+            verification_id=verification_id,
+        ), invocation
 
     try:
-        try:
-            argv = [arg.replace("{prompt}", prompt) for arg in config.agent_argv]
-            process = subprocess.Popen(
-                argv,
-                cwd=src_dir,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-        except OSError as exc:
-            return VerificationResult(
-                status=VerificationStatus.FAIL,
-                reasoning=f"Verification could not be launched: {exc}",
-                verification_id=verification_id,
-            )
+        raw_status = data["status"]
+    except (KeyError, TypeError):
+        return VerificationResult(
+            status=VerificationStatus.FAIL,
+            reasoning="Verification response missing 'status' field.",
+            verification_id=verification_id,
+        ), invocation
 
-        try:
-            stdout, _ = process.communicate(
-                timeout=config.verification_timeout_seconds,
-            )
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-            return VerificationResult(
-                status=VerificationStatus.FAIL,
-                reasoning=(
-                    f"Verification timed out after "
-                    f"{config.verification_timeout_seconds} seconds."
-                ),
-                verification_id=verification_id,
-                timed_out=True,
-            )
-        except KeyboardInterrupt:
-            process.kill()
-            process.wait()
-            raise
-
-        if process.returncode != 0:
-            return VerificationResult(
-                status=VerificationStatus.FAIL,
-                reasoning=(
-                    f"Verification exited with non-zero exit code {process.returncode}."
-                ),
-                verification_id=verification_id,
-            )
-
-        data = _parse_last_json_line(stdout)
-
-        if data is None:
-            lines = [line for line in stdout.splitlines() if line.strip()]
-            if not lines:
-                return VerificationResult(
-                    status=VerificationStatus.FAIL,
-                    reasoning="Verification produced no output.",
-                    verification_id=verification_id,
-                )
-            return VerificationResult(
-                status=VerificationStatus.FAIL,
-                reasoning="Verification output could not be parsed as JSON.",
-                verification_id=verification_id,
-            )
-
-        try:
-            raw_status = data["status"]
-        except (KeyError, TypeError):
-            return VerificationResult(
-                status=VerificationStatus.FAIL,
-                reasoning="Verification response missing 'status' field.",
-                verification_id=verification_id,
-            )
-
-        if raw_status == "PASS":
-            return VerificationResult(
-                status=VerificationStatus.PASS,
-                reasoning=data.get("reasoning") or "",
-                verification_id=verification_id,
-            )
-        elif raw_status == "FAIL":
-            return VerificationResult(
-                status=VerificationStatus.FAIL,
-                reasoning=data.get("reasoning") or "",
-                verification_id=verification_id,
-            )
-        else:
-            return VerificationResult(
-                status=VerificationStatus.FAIL,
-                reasoning=f"Verification returned unknown status: {raw_status!r}.",
-                verification_id=verification_id,
-            )
-
-    finally:
-        pass  # No SIGTERM handler; outer task_run finally handles lock release.
+    if raw_status == "PASS":
+        return VerificationResult(
+            status=VerificationStatus.PASS,
+            reasoning=data.get("reasoning") or "",
+            verification_id=verification_id,
+        ), invocation
+    elif raw_status == "FAIL":
+        return VerificationResult(
+            status=VerificationStatus.FAIL,
+            reasoning=data.get("reasoning") or "",
+            verification_id=verification_id,
+        ), invocation
+    else:
+        return VerificationResult(
+            status=VerificationStatus.FAIL,
+            reasoning=f"Verification returned unknown status: {raw_status!r}.",
+            verification_id=verification_id,
+        ), invocation
 
 
 def run_verifications(
     project_root: Path,
     config: Config,
-) -> tuple[VerificationStatus, Optional[VerificationResult]]:
+    emitter: Optional[EventEmitter] = None,
+) -> tuple[VerificationStatus, Optional[VerificationResult], list[AgentInvocation]]:
     """
     Run all verification agents found in src/.agent-context/verifications/
     in lexicographic filename order.  Halts on the first FAIL.
 
     Returns:
-      (PASS, None)          — all verifications passed, or no files found
-      (FAIL, result)        — first failing VerificationResult
+      (PASS, None, invocations)    — all verifications passed, or no files found
+      (FAIL, result, invocations)  — first failing VerificationResult
     """
     verifications_dir = project_root / "src" / ".agent-context" / "verifications"
+    invocations: list[AgentInvocation] = []
+    effective_emitter = emitter or EventEmitter()
 
     if not verifications_dir.exists():
-        return VerificationStatus.PASS, None
+        return VerificationStatus.PASS, None, invocations
 
     verification_files = sorted(
         [f for f in verifications_dir.iterdir() if f.is_file()],
@@ -201,11 +185,14 @@ def run_verifications(
     )
 
     if not verification_files:
-        return VerificationStatus.PASS, None
+        return VerificationStatus.PASS, None, invocations
 
     for vfile in verification_files:
-        result = _run_single_verification(vfile, project_root, config)
+        result, invocation = _run_single_verification(
+            vfile, project_root, config, effective_emitter
+        )
+        invocations.append(invocation)
         if result.status == VerificationStatus.FAIL:
-            return VerificationStatus.FAIL, result
+            return VerificationStatus.FAIL, result, invocations
 
-    return VerificationStatus.PASS, None
+    return VerificationStatus.PASS, None, invocations

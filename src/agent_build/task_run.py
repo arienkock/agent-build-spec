@@ -14,7 +14,7 @@ from .config import Config
 from .events import AgentEvent, AgentOutput, EventEmitter
 from .preflight import PreflightError, release_lock
 from .results import ResultsStore
-from .types import ResultRecord, Task, TaskRunStatus
+from .types import AgentInvocation, ResultRecord, Task, TaskRunStatus
 from .verification import VerificationStatus, run_verifications
 from .ui import OutputManager
 
@@ -72,6 +72,7 @@ def _write_failed_record(
     input_tokens: Optional[int] = None,
     output_tokens: Optional[int] = None,
     cost: Optional[float] = None,
+    invocations: list[AgentInvocation] | None = None,
 ) -> None:
     """Archive the current latest record and write a FAILED record."""
     prev = store.next_archive_filename(task_id)
@@ -86,6 +87,7 @@ def _write_failed_record(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost=cost,
+            invocations=invocations or [],
         ),
     )
 
@@ -211,6 +213,7 @@ def run_task(
         total_output_tokens = 0
         total_cost = 0.0
         session_id: Optional[str] = None
+        all_invocations: list[AgentInvocation] = []
 
         try:
             # ── Outer loop: agent invocation + verification cycle ──────────────────
@@ -230,6 +233,15 @@ def run_task(
                             emitter,
                             session_id=session_id,
                         )
+                        all_invocations.append(
+                            AgentInvocation(
+                                type="implementation",
+                                model=config.model,
+                                input_tokens=result.input_tokens,
+                                output_tokens=result.output_tokens,
+                                cost=result.cost,
+                            )
+                        )
 
                         if result.session_id:
                             session_id = result.session_id
@@ -243,6 +255,7 @@ def run_task(
                                 total_input_tokens,
                                 total_output_tokens,
                                 total_cost,
+                                all_invocations,
                             )
                             raise TaskRunError(
                                 f"Failed to launch agent: {result.error}"
@@ -264,6 +277,7 @@ def run_task(
                                 total_input_tokens,
                                 total_output_tokens,
                                 total_cost,
+                                all_invocations,
                             )
                             raise TaskRunError(
                                 f"Agent exited with non-zero exit code: {result.exit_code}"
@@ -279,6 +293,7 @@ def run_task(
                                     total_input_tokens,
                                     total_output_tokens,
                                     total_cost,
+                                    all_invocations,
                                 )
                                 raise TaskRunError(
                                     "Agent timed out and the retry limit is exhausted."
@@ -309,6 +324,15 @@ def run_task(
                             emitter,
                             session_id=session_id,
                         )
+                        all_invocations.append(
+                            AgentInvocation(
+                                type="review",
+                                model=config.model,
+                                input_tokens=review_result.input_tokens,
+                                output_tokens=review_result.output_tokens,
+                                cost=review_result.cost,
+                            )
+                        )
 
                         if review_result.session_id:
                             session_id = review_result.session_id
@@ -324,6 +348,7 @@ def run_task(
                                 total_output_tokens
                                 + (review_result.output_tokens or 0),
                                 total_cost + (review_result.cost or 0.0),
+                                all_invocations,
                             )
                             raise TaskRunError(
                                 f"Failed to launch review: {review_result.error}"
@@ -345,6 +370,7 @@ def run_task(
                                 total_input_tokens,
                                 total_output_tokens,
                                 total_cost,
+                                all_invocations,
                             )
                             raise TaskRunError(
                                 f"Review agent exited with non-zero exit code: {review_result.exit_code}"
@@ -361,6 +387,7 @@ def run_task(
                                 total_input_tokens,
                                 total_output_tokens,
                                 total_cost,
+                                all_invocations,
                             )
                             raise TaskRunError(
                                 "Review agent timed out. Implementation was completed but review failed."
@@ -370,7 +397,18 @@ def run_task(
                         result = review_result
 
                 # ── Verification phase ─────────────────────────────────────────────
-                v_status, failing = run_verifications(project_root, config)
+                v_status, failing, v_invocations = run_verifications(
+                    project_root, config, emitter
+                )
+
+                all_invocations.extend(v_invocations)
+                for inv in v_invocations:
+                    if inv.input_tokens:
+                        total_input_tokens += inv.input_tokens
+                    if inv.output_tokens:
+                        total_output_tokens += inv.output_tokens
+                    if inv.cost:
+                        total_cost += inv.cost
 
                 if v_status == VerificationStatus.PASS:
                     break  # all verifications passed; proceed to COMPLETED record
@@ -387,6 +425,7 @@ def run_task(
                         total_input_tokens,
                         total_output_tokens,
                         total_cost,
+                        all_invocations,
                     )
                     raise TaskRunError(
                         f"Verification '{failing.verification_id}' failed and the "
@@ -418,6 +457,7 @@ def run_task(
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
                 cost=total_cost,
+                invocations=all_invocations,
             )
             store.write(task.id, completed_record)
 
@@ -445,6 +485,7 @@ def run_task(
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
                     cost=total_cost,
+                    invocations=all_invocations,
                 )
                 store.write(task.id, failed_record)
                 raise TaskRunError(
