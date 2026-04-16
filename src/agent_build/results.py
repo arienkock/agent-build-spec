@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from .types import ResultRecord, TaskRunStatus
+from .types import AgentInvocation, ResultRecord, TaskRunStatus
 
 _LATEST_RE = re.compile(r"^results-(.+)\.json$")
 _ARCHIVED_RE = re.compile(r"^results-(.+)--run-(\d+)\.json$")
@@ -24,6 +24,33 @@ class ResultsStore:
     # ------------------------------------------------------------------
     # Serialisation helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _invocation_to_dict(invocation: AgentInvocation) -> dict:
+        d: dict = {
+            "type": invocation.type,
+            "model": invocation.model,
+        }
+        if invocation.input_tokens is not None:
+            d["inputTokens"] = invocation.input_tokens
+        if invocation.output_tokens is not None:
+            d["outputTokens"] = invocation.output_tokens
+        if invocation.cost is not None:
+            d["cost"] = invocation.cost
+        if invocation.verification_id is not None:
+            d["verificationId"] = invocation.verification_id
+        return d
+
+    @staticmethod
+    def _invocation_from_dict(data: dict) -> AgentInvocation:
+        return AgentInvocation(
+            type=data.get("type") or "unknown",
+            model=data.get("model") or "unknown",
+            input_tokens=data.get("inputTokens"),
+            output_tokens=data.get("outputTokens"),
+            cost=data.get("cost"),
+            verification_id=data.get("verificationId"),
+        )
 
     @staticmethod
     def _to_dict(record: ResultRecord) -> dict:
@@ -54,6 +81,10 @@ class ResultsStore:
             d["outputTokens"] = record.output_tokens
         if record.cost is not None:
             d["cost"] = record.cost
+        if record.invocations:
+            d["invocations"] = [
+                ResultsStore._invocation_to_dict(inv) for inv in record.invocations
+            ]
         return d
 
     @staticmethod
@@ -78,6 +109,11 @@ class ResultsStore:
             input_tokens=data.get("inputTokens"),
             output_tokens=data.get("outputTokens"),
             cost=data.get("cost"),
+            invocations=[
+                ResultsStore._invocation_from_dict(inv)
+                for inv in data.get("invocations", [])
+                if isinstance(inv, dict)
+            ],
         )
 
     # ------------------------------------------------------------------

@@ -35,6 +35,7 @@ class AgentResult:
     output_tokens: Optional[int] = None
     cost: Optional[float] = None
     session_id: Optional[str] = None
+    last_json: Optional[dict] = None
 
 
 class OpenCodeParser:
@@ -43,6 +44,7 @@ class OpenCodeParser:
         self.output_tokens = 0
         self.cost = 0.0
         self.session_id: Optional[str] = None
+        self.last_json: Optional[dict] = None
 
     def parse_line(self, line: str) -> Optional[str]:
         """Parse a JSON line and return a human-readable string if applicable."""
@@ -52,6 +54,7 @@ class OpenCodeParser:
 
         try:
             data = json.loads(line)
+            self.last_json = data
         except json.JSONDecodeError:
             # If it's not valid JSON, just pass it through as raw text
             return line
@@ -208,6 +211,7 @@ def run_agent(
                 output_tokens=parser.output_tokens,
                 cost=parser.cost,
                 session_id=parser.session_id,
+                last_json=parser.last_json,
             )
         return AgentResult(
             outcome=AgentOutcome.FAILED,
@@ -216,6 +220,7 @@ def run_agent(
             output_tokens=parser.output_tokens,
             cost=parser.cost,
             session_id=parser.session_id,
+            last_json=parser.last_json,
         )
 
     finally:

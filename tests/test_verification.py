@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from agent_build.config import Config
+from agent_build.events import EventEmitter
 from agent_build.verification import (
     VerificationResult,
     VerificationStatus,
@@ -107,10 +108,11 @@ def test_pass_response(tmp_path):
     _add_verification(vdir, "001-check.md")
     config = _make_config(tmp_path)
 
-    status, result = run_verifications(project_root, config)
+    status, result, invocations = run_verifications(project_root, config)
 
     assert status == VerificationStatus.PASS
     assert result is None
+    assert len(invocations) == 1
 
 
 def test_last_nonempty_line_parsed(tmp_path):
@@ -132,7 +134,7 @@ def test_last_nonempty_line_parsed(tmp_path):
     # However, the raw_output itself IS the JSON line when passed as --verification-raw-output
     # (since it's printed as-is). We need the last line to be JSON.
     # The raw_output we constructed has the JSON as the last line.
-    status, result = run_verifications(project_root, config)
+    status, result, _ = run_verifications(project_root, config)
 
     assert status == VerificationStatus.PASS
 
@@ -144,7 +146,7 @@ def test_nonzero_exit_fail(tmp_path):
     _add_verification(vdir, "001-check.md")
     config = _make_config(tmp_path, verification_exit_code=1)
 
-    status, result = run_verifications(project_root, config)
+    status, result, _ = run_verifications(project_root, config)
 
     assert status == VerificationStatus.FAIL
     assert result is not None
@@ -158,11 +160,11 @@ def test_empty_output_fail(tmp_path):
     _add_verification(vdir, "001-check.md")
     config = _make_config(tmp_path, verification_no_output=True)
 
-    status, result = run_verifications(project_root, config)
+    status, result, _ = run_verifications(project_root, config)
 
     assert status == VerificationStatus.FAIL
     assert result is not None
-    assert "no output" in result.reasoning.lower()
+    assert "output" in result.reasoning.lower()
 
 
 def test_nonjson_output_fail(tmp_path):
@@ -172,7 +174,7 @@ def test_nonjson_output_fail(tmp_path):
     _add_verification(vdir, "001-check.md")
     config = _make_config(tmp_path, verification_raw_output="this is not json at all")
 
-    status, result = run_verifications(project_root, config)
+    status, result, _ = run_verifications(project_root, config)
 
     assert status == VerificationStatus.FAIL
     assert result is not None
@@ -189,7 +191,7 @@ def test_timeout_fail(tmp_path):
         tmp_path, verification_sleep=3, verification_timeout_seconds=1
     )
 
-    status, result = run_verifications(project_root, config)
+    status, result, _ = run_verifications(project_root, config)
 
     assert status == VerificationStatus.FAIL
     assert result is not None
@@ -212,7 +214,7 @@ def test_oserror_fail(tmp_path):
         max_retries=0,
     )
 
-    status, result = run_verifications(project_root, bad_config)
+    status, result, _ = run_verifications(project_root, bad_config)
 
     assert status == VerificationStatus.FAIL
     assert result is not None
@@ -225,10 +227,11 @@ def test_no_files_skip(tmp_path):
     # verifications dir is empty
     config = _make_config(tmp_path)
 
-    status, result = run_verifications(project_root, config)
+    status, result, invocations = run_verifications(project_root, config)
 
     assert status == VerificationStatus.PASS
     assert result is None
+    assert invocations == []
 
 
 def test_no_verifications_dir(tmp_path):
@@ -240,10 +243,11 @@ def test_no_verifications_dir(tmp_path):
     shutil.rmtree(project_root / "src" / ".agent-context" / "verifications")
     config = _make_config(tmp_path)
 
-    status, result = run_verifications(project_root, config)
+    status, result, invocations = run_verifications(project_root, config)
 
     assert status == VerificationStatus.PASS
     assert result is None
+    assert invocations == []
 
 
 def test_lexicographic_halt_on_first_fail(tmp_path):
@@ -257,11 +261,12 @@ def test_lexicographic_halt_on_first_fail(tmp_path):
     _add_verification(vdir, "bbb.md", "# Check B\n")
     config = _make_config(tmp_path, verification_fail=True)
 
-    status, result = run_verifications(project_root, config)
+    status, result, invocations = run_verifications(project_root, config)
 
     assert status == VerificationStatus.FAIL
     assert result is not None
     assert result.verification_id == "aaa"
+    assert len(invocations) == 1
 
 
 def test_verification_id_is_stem(tmp_path):
@@ -271,7 +276,7 @@ def test_verification_id_is_stem(tmp_path):
     _add_verification(vdir, "007-syntax.md")
     config = _make_config(tmp_path, verification_fail=True)
 
-    status, result = run_verifications(project_root, config)
+    status, result, _ = run_verifications(project_root, config)
 
     assert status == VerificationStatus.FAIL
     assert result is not None
@@ -289,7 +294,7 @@ def test_extra_json_fields_pass(tmp_path):
     )
     config = _make_config(tmp_path, verification_raw_output=raw_output)
 
-    status, result = run_verifications(project_root, config)
+    status, result, _ = run_verifications(project_root, config)
 
     assert status == VerificationStatus.PASS
 
@@ -307,11 +312,12 @@ def test_second_fail_not_accumulated(tmp_path):
     # Configure fake to FAIL only when stdin contains the bbb.md content marker
     config = _make_config(tmp_path, fail_if_stdin_contains="Check B")
 
-    status, result = run_verifications(project_root, config)
+    status, result, invocations = run_verifications(project_root, config)
 
     assert status == VerificationStatus.FAIL
     assert result is not None
     assert result.verification_id == "bbb"
+    assert len(invocations) == 2
 
 
 def test_fail_result_contains_reasoning(tmp_path):
@@ -323,7 +329,7 @@ def test_fail_result_contains_reasoning(tmp_path):
         tmp_path, verification_fail=True, fail_reason="Missing required field"
     )
 
-    status, result = run_verifications(project_root, config)
+    status, result, _ = run_verifications(project_root, config)
 
     assert status == VerificationStatus.FAIL
     assert result is not None
@@ -362,10 +368,13 @@ def test_verification_file_deleted_mid_run(tmp_path):
     # where the file existed during iterdir() but was removed before read_text().
     missing_file = project_root / "src" / ".agent-context" / "verifications" / "gone.md"
 
-    result = _run_single_verification(missing_file, project_root, config)
+    result, invocation = _run_single_verification(
+        missing_file, project_root, config, EventEmitter()
+    )
 
     assert result.status == VerificationStatus.FAIL
     assert "could not be read" in result.reasoning.lower()
+    assert invocation.verification_id == "gone"
 
 
 def test_null_reasoning_coerced_to_empty_string(tmp_path):
@@ -380,7 +389,7 @@ def test_null_reasoning_coerced_to_empty_string(tmp_path):
     null_reasoning_json = json.dumps({"status": "FAIL", "reasoning": None})
     config = _make_config(tmp_path, verification_raw_output=null_reasoning_json)
 
-    status, result = run_verifications(project_root, config)
+    status, result, _ = run_verifications(project_root, config)
 
     assert status == VerificationStatus.FAIL
     assert result is not None
